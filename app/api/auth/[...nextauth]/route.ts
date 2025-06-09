@@ -1,3 +1,25 @@
+/**
+ * NextAuth.js Configuration and Route Handlers
+ * 
+ * This file sets up authentication using Google OAuth2 with Smart Device Management scope.
+ * It handles both GET and POST requests for authentication flows.
+ * 
+ * Routes:
+ * - GET /api/auth/[...nextauth]: Handles sign-in, sign-out, and session checks
+ * - POST /api/auth/[...nextauth]: Handles OAuth callbacks and token refresh
+ * 
+ * Key Components:
+ * - GoogleProvider: OAuth2 provider for Google authentication
+ * - JWT Callback: Manages token lifecycle and refresh
+ * - Session Callback: Ensures access token is available in session
+ * 
+ * Required Environment Variables:
+ * - NEXTAUTH_SECRET: Secret key for JWT encryption
+ * - NEXTAUTH_URL: Base URL of the application
+ * - GOOGLE_CLIENT_ID: Google OAuth client ID
+ * - GOOGLE_CLIENT_SECRET: Google OAuth client secret
+ */
+
 import NextAuth, { DefaultSession, AuthOptions } from 'next-auth';
 import GoogleProvider from 'next-auth/providers/google';
 
@@ -18,6 +40,10 @@ if (!process.env.NEXTAUTH_URL) {
   throw new Error('NEXTAUTH_URL is not set');
 }
 
+/**
+ * Authentication options configuration for NextAuth.js
+ * Sets up Google OAuth provider with Smart Device Management scope
+ */
 export const authOptions: AuthOptions = {
   providers: [
     GoogleProvider({
@@ -126,6 +152,10 @@ export const authOptions: AuthOptions = {
   }
 };
 
+/**
+ * NextAuth.js handler for both GET and POST requests
+ * Exports as both GET and POST to handle all auth-related requests
+ */
 const handler = NextAuth(authOptions);
 
 export { handler as GET, handler as POST }; 

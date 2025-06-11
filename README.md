@@ -113,3 +113,41 @@ npm test
 # Run with coverage
 npm run test:coverage
 ```
+
+## API Routes
+
+- `/api/devices/[deviceId]` - Device data endpoint
+- `/api/devices/[deviceId]/temperature-history` - Historical temperature data
+- `/api/socket` - WebSocket connection endpoint
+- `/api/socketio` - Socket.IO connection endpoint
+
+## Authentication and Authorization
+
+### Token Management
+
+1. **Access Tokens**
+   - Short-lived (1 hour)
+   - Automatically refreshed using refresh tokens
+   - Stored securely in session
+
+2. **Refresh Tokens**
+   - Long-lived (up to 6 months)
+   - Used to obtain new access tokens
+   - Stored securely in database
+
+3. **Token Refresh Flow**
+   ```typescript
+   // Automatic refresh handled by NextAuth
+   const { data: session } = useSession();
+   
+   // Manual refresh if needed
+   const refreshToken = async () => {
+     await signIn('google', { callbackUrl: '/' });
+   };
+   ```
+
+### Authorization Scopes
+
+Required OAuth scopes:
+- `https://www.googleapis.com/auth/sdm.service`
+- `https://www.googleapis.com/auth/sdm.devices.read`

@@ -2,6 +2,8 @@
 
 A real-time temperature monitoring system built with Next.js, featuring WebSocket support and REST API fallback.
 
+Last updated: 2024-03-19
+
 ## Requirements
 
 - Node.js >= 18.0.0

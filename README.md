@@ -77,7 +77,8 @@ npm install
 ### 3. Environment Configuration
 
 Create a `.env.local` file in the root directory with the following variables:
-```
+
+```env
 NEXTAUTH_URL=http://localhost:3000
 NEXTAUTH_SECRET=your-secret-key
 GOOGLE_CLIENT_ID=your-google-client-id

@@ -8,6 +8,8 @@ A real-time temperature monitoring system built with Next.js, featuring WebSocke
 - npm >= 9.0.0
 - Git >= 2.0.0
 - A modern web browser (Chrome, Firefox, Safari, or Edge)
+- Google Cloud Platform account
+- Nest Developer account
 
 ## Features
 
@@ -76,9 +78,36 @@ Create a `.env.local` file in the root directory with the following variables:
 ```
 NEXTAUTH_URL=http://localhost:3000
 NEXTAUTH_SECRET=your-secret-key
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+NEST_CLIENT_ID=your-nest-client-id
+NEST_CLIENT_SECRET=your-nest-client-secret
 ```
 
-### 4. Running the Application
+### 4. Google Cloud Platform Setup
+
+1. Create a new project in Google Cloud Console
+2. Enable the following APIs:
+   - Google Smart Device Management API
+   - Google OAuth2 API
+3. Configure OAuth consent screen:
+   - Add required scopes:
+     - `https://www.googleapis.com/auth/sdm.service`
+     - `https://www.googleapis.com/auth/sdm.devices.read`
+4. Create OAuth 2.0 credentials:
+   - Set authorized redirect URIs
+   - Download client credentials
+
+### 5. Nest Developer Setup
+
+1. Create a Nest Developer account
+2. Create a new project
+3. Configure OAuth settings:
+   - Set redirect URIs
+   - Configure allowed domains
+4. Note down client ID and secret
+
+### 6. Running the Application
 
 #### Development Mode
 ```bash
@@ -97,7 +126,7 @@ npm run build
 npm start
 ```
 
-### 5. Running Tests
+### 7. Running Tests
 ```bash
 # Run unit tests
 npm test
@@ -112,6 +141,65 @@ npm run test:coverage
 - `/api/devices/[deviceId]/temperature-history` - Historical temperature data
 - `/api/socket` - WebSocket connection endpoint
 - `/api/socketio` - Socket.IO connection endpoint
+
+## Authentication and Authorization
+
+### Token Management
+
+1. **Access Tokens**
+   - Short-lived (1 hour)
+   - Automatically refreshed using refresh tokens
+   - Stored securely in session
+
+2. **Refresh Tokens**
+   - Long-lived (up to 6 months)
+   - Used to obtain new access tokens
+   - Stored securely in database
+
+3. **Token Refresh Flow**
+   ```typescript
+   // Automatic refresh handled by NextAuth
+   const { data: session } = useSession();
+   
+   // Manual refresh if needed
+   const refreshToken = async () => {
+     await signIn('google', { callbackUrl: '/' });
+   };
+   ```
+
+### Authorization Scopes
+
+Required OAuth scopes:
+- `https://www.googleapis.com/auth/sdm.service`
+- `https://www.googleapis.com/auth/sdm.devices.read`
+
+## Nest API Limitations
+
+### Rate Limits
+- 100 requests per minute per project
+- 1000 requests per day per project
+- WebSocket connections: 1 per device
+
+### Data Limitations
+- Temperature updates: Every 30 seconds
+- Historical data: 7 days retention
+- Maximum devices per project: 100
+
+### Known Issues
+1. **WebSocket Disconnections**
+   - Automatic reconnection implemented
+   - Fallback to REST API polling
+   - Maximum retry attempts: 5
+
+2. **Token Expiration**
+   - Access tokens expire after 1 hour
+   - Refresh tokens expire after 6 months
+   - Automatic refresh implemented
+
+3. **API Quotas**
+   - Monitor usage in Google Cloud Console
+   - Implement rate limiting in your application
+   - Use caching when possible
 
 ## Troubleshooting
 
@@ -140,6 +228,18 @@ npm run test:coverage
    - Ensure your firewall allows WebSocket connections
    - Check browser console for connection errors
    - Verify environment variables are set correctly
+
+4. **Authentication Issues**
+   - Verify OAuth credentials
+   - Check token expiration
+   - Ensure correct redirect URIs
+   - Verify required scopes
+
+5. **API Rate Limiting**
+   - Monitor request frequency
+   - Implement exponential backoff
+   - Use WebSocket when possible
+   - Cache frequently accessed data
 
 ## Contributing
 

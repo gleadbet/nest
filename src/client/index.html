@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Nest Thermostat Control</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <script>
+    // Add error handling for script loading
+    window.onerror = function(msg, url, lineNo, columnNo, error) {
+      console.error('Error: ' + msg + '\nURL: ' + url + '\nLine: ' + lineNo + '\nColumn: ' + columnNo + '\nError object: ' + JSON.stringify(error));
+      return false;
+    };
+
+    // Add loading state check
+    console.log('Initializing application...');
+    window.addEventListener('load', function() {
+      console.log('Page fully loaded');
+      if (!window.React) {
+        console.error('React not loaded!');
+        document.getElementById('root').innerHTML = '<div class="p-4"><h1 class="text-2xl font-bold text-red-500">Error Loading Application</h1><p>React failed to load. Please check the console for errors.</p></div>';
+      }
+    });
+  </script>
+</head>
+<body>
+  <!-- Empty div for React to mount into -->
+  <div id="root"></div>
+  
+  <!-- Load React first -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  
+  <!-- Then load our bundle -->
+  <script src="/static/bundle.js"></script>
+</body>
+</html> 

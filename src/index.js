@@ -12,7 +12,7 @@ const https = require('https');
 // Add caching variables
 let deviceListCache = null;
 let lastDeviceListFetch = 0;
-const CACHE_DURATION = 5000; // 5 seconds
+const CACHE_DURATION = 30000; // 30 seconds cache
 
 // Configure axios with custom HTTPS agent
 const httpsAgent = new https.Agent({
@@ -55,8 +55,8 @@ const port = process.env.PORT || 3000;
 // Configure session first
 const sessionMiddleware = session({
   secret: process.env.SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
+  resave: true,
+  saveUninitialized: true,
   cookie: { 
     secure: false,
     httpOnly: true,
@@ -77,6 +77,18 @@ app.use(cors({
 
 // Then use session middleware
 app.use(sessionMiddleware);
+
+// Add session debugging middleware
+app.use((req, res, next) => {
+  console.log('Session Debug:', {
+    hasSession: !!req.session,
+    hasTokens: !!req.session?.tokens,
+    hasAccessToken: !!req.session?.accessToken,
+    path: req.path,
+    method: req.method
+  });
+  next();
+});
 
 // Then parse JSON
 app.use(express.json());
@@ -145,9 +157,17 @@ try {
   // API routes - MUST come before static file serving
   app.get('/api/auth/status', (req, res) => {
     console.log('Auth status endpoint hit');
+    console.log('Session state:', {
+      hasSession: !!req.session,
+      hasTokens: !!req.session?.tokens,
+      hasAccessToken: !!req.session?.accessToken,
+      sessionID: req.session?.id
+    });
+    
     const accessToken = req.session?.tokens?.access_token || req.session?.accessToken;
     
     if (!accessToken) {
+      console.log('No access token found in session');
       res.setHeader('Content-Type', 'application/json');
       return res.status(401).json({ 
         error: 'Not authenticated',
@@ -167,30 +187,25 @@ try {
     
     // Return cached list if it's fresh enough
     if (!forceRefresh && deviceListCache && (now - lastDeviceListFetch) < CACHE_DURATION) {
-      console.log('Returning cached device list');
+      console.log('Returning cached device list:', deviceListCache);
       return deviceListCache;
     }
 
     try {
       console.log('Fetching fresh device list...');
-      const response = await backOff(
-        () => axios.get(
-          `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices`,
-          {
-            headers: {
-              Authorization: `Bearer ${accessToken}`
-            }
-          }
-        ),
+      const response = await axios.get(
+        `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices`,
         {
-          numOfAttempts: 3,
-          startingDelay: 1000,
-          timeMultiple: 2,
-          maxDelay: 5000
+          headers: {
+            Authorization: `Bearer ${accessToken}`
+          }
         }
       );
 
+      console.log('Raw API response:', response.data);
+
       if (!response.data?.devices) {
+        console.log('No devices in response');
         return [];
       }
 
@@ -201,6 +216,11 @@ try {
       return response.data.devices;
     } catch (error) {
       console.error('Error fetching device list:', error);
+      // If we have cached data and the error is rate limiting, return cached data
+      if (error.response?.status === 429 && deviceListCache) {
+        console.log('Rate limited, returning cached data:', deviceListCache);
+        return deviceListCache;
+      }
       throw error;
     }
   }
@@ -210,6 +230,7 @@ try {
       const accessToken = req.session?.tokens?.access_token || req.session?.accessToken;
       
       if (!accessToken) {
+        console.log('No access token found');
         res.setHeader('Content-Type', 'application/json');
         return res.status(401).json({ 
           error: 'Please login first',
@@ -217,7 +238,9 @@ try {
         });
       }
 
+      console.log('Fetching devices with token:', accessToken.substring(0, 10) + '...');
       const devices = await fetchDeviceList(accessToken);
+      console.log('Raw devices from API:', devices);
 
       const thermostats = devices
         .filter(device => device.type === 'sdm.devices.types.THERMOSTAT')
@@ -225,11 +248,10 @@ try {
           const deviceId = device.name.split('/').pop();
           const traits = device.traits || {};
           
-          // Log the device traits for debugging
-          console.log('Device traits:', {
-            deviceId,
-            allTraits: traits,
-            targetTemp: traits['sdm.devices.traits.ThermostatTemperatureSetpoint']
+          console.log('Processing device:', {
+            id: deviceId,
+            name: device.name,
+            traits: traits
           });
 
           // Get target temperature from the correct trait
@@ -237,7 +259,7 @@ try {
                            traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius || 
                            'N/A';
 
-          return {
+          const processedDevice = {
             id: deviceId,
             name: req.session.customNames?.[deviceId] || device.name.split('/').pop(),
             currentTemp: traits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius || 'N/A',
@@ -245,19 +267,21 @@ try {
             mode: traits['sdm.devices.traits.ThermostatMode']?.mode || 'N/A',
             humidity: traits['sdm.devices.traits.Humidity']?.ambientHumidityPercent || 'N/A'
           };
+
+          console.log('Processed device:', processedDevice);
+          return processedDevice;
         });
 
-      // Log the processed thermostats
-      console.log('Processed thermostats:', thermostats);
-
+      console.log('Sending response with thermostats:', thermostats);
       res.setHeader('Content-Type', 'application/json');
       res.json(thermostats);
     } catch (error) {
-      if (error.response?.status === 401) {
+      console.error('Error in /api/devices:', error);
+      if (error.response?.status === 429) {
         res.setHeader('Content-Type', 'application/json');
-        return res.status(401).json({ 
-          error: 'Session expired. Please login again.',
-          authenticated: false
+        return res.status(429).json({ 
+          error: 'Rate limited by Nest API',
+          details: 'Please try again in a few minutes'
         });
       }
       
@@ -684,10 +708,12 @@ try {
     console.log('Callback route hit');
     console.log('Full request query:', req.query);
     console.log('Full request headers:', req.headers);
-    console.log('Session state:', {
+    console.log('Session state before:', {
+      hasSession: !!req.session,
       hasTokens: !!req.session?.tokens,
       hasAccessToken: !!req.session?.accessToken,
-      oauthState: req.session?.oauthState
+      oauthState: req.session?.oauthState,
+      sessionID: req.session?.id
     });
     
     try {
@@ -700,8 +726,6 @@ try {
       
       if (!code) {
         console.error('No code in query params:', req.query);
-        console.error('Request URL:', req.url);
-        console.error('Request method:', req.method);
         throw new Error('No authorization code provided');
       }
 
@@ -740,12 +764,19 @@ try {
         req.session.accessToken = tokens.access_token;
         console.log('Session updated with tokens');
 
-        // Save session before redirect
+        // Save session explicitly
         req.session.save((err) => {
           if (err) {
             console.error('Error saving session:', err);
             return res.redirect('/auth/login');
           }
+          console.log('Session saved successfully');
+          console.log('Session state after save:', {
+            hasSession: !!req.session,
+            hasTokens: !!req.session?.tokens,
+            hasAccessToken: !!req.session?.accessToken,
+            sessionID: req.session?.id
+          });
           res.redirect('/');
         });
       } catch (tokenError) {

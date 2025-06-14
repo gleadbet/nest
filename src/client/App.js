@@ -1,17 +1,150 @@
 import React, { useState, useEffect } from 'react';
+import TemperatureGraph from '../components/TemperatureGraph';
 
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
   const [devices, setDevices] = useState([]);
-  const [selectedDevice, setSelectedDevice] = useState(null);
-  const [useFahrenheit, setUseFahrenheit] = useState(false);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [useFahrenheit, setUseFahrenheit] = useState(true);
+  const [pollInterval, setPollInterval] = useState(30);
+  const [tempIncrement, setTempIncrement] = useState(0.5);
+  const [pollError, setPollError] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [isPolling, setIsPolling] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [editingName, setEditingName] = useState(null);
   const [newName, setNewName] = useState('');
-  const [lastUpdate, setLastUpdate] = useState(null);
-  const [pollInterval, setPollInterval] = useState(30); // Default 30 seconds
-  const [tempIncrement, setTempIncrement] = useState(0.5); // Default 0.5 degree increment
+  const BASE_INTERVAL = 60000;
+
+  // Check authentication status
+  const checkAuth = async () => {
+    try {
+      console.log('Checking authentication status...');
+      const response = await fetch('/api/auth/status', {
+        credentials: 'include'
+      });
+      const data = await response.json();
+      console.log('Auth status response:', data);
+      
+      if (!response.ok || !data.authenticated) {
+        console.log('Not authenticated, redirecting to login...');
+        window.location.href = '/auth/login';
+        return false;
+      }
+      
+      setIsAuthenticated(true);
+      return true;
+    } catch (error) {
+      console.error('Error checking auth status:', error);
+      window.location.href = '/auth/login';
+      return false;
+    }
+  };
+
+  const fetchDevices = async () => {
+    try {
+      // Check authentication first
+      const isAuth = await checkAuth();
+      if (!isAuth) return;
+
+      console.log('Fetching devices...');
+      const response = await fetch('/api/devices', {
+        credentials: 'include'
+      });
+      
+      console.log('Response status:', response.status);
+      const data = await response.json();
+      console.log('Raw response data:', data);
+      
+      if (!response.ok) {
+        if (data.authenticated === false) {
+          setError('Session expired. Please login again.');
+          setLoading(false);
+          window.location.href = '/auth/login';
+          return;
+        }
+        if (response.status === 429) {
+          const newRetryCount = retryCount + 1;
+          setRetryCount(newRetryCount);
+          const backoffTime = Math.min(BASE_INTERVAL * Math.pow(2, newRetryCount), 300000);
+          setPollError(`Rate limited. Next update in ${Math.round(backoffTime/1000)} seconds...`);
+          setIsPolling(false);
+          setTimeout(() => {
+            setIsPolling(true);
+            setRetryCount(0);
+          }, backoffTime);
+          return;
+        }
+        throw new Error(data.details || data.error || 'Failed to fetch devices');
+      }
+
+      // Reset retry count on successful fetch
+      setRetryCount(0);
+      setPollError(null);
+      setIsPolling(true);
+      setLoading(false);
+
+      if (!Array.isArray(data)) {
+        console.error('Invalid response format:', data);
+        return;
+      }
+
+      console.log('Processing device data...');
+      const processedData = data.map(device => {
+        console.log('Processing device:', device);
+        const processed = {
+          ...device,
+          currentTemp: typeof device.currentTemp === 'number' ? device.currentTemp : 
+            device.currentTemp === 'N/A' ? 'N/A' : parseFloat(device.currentTemp),
+          targetTemp: typeof device.targetTemp === 'number' ? device.targetTemp : 
+            device.targetTemp === 'N/A' ? 'N/A' : parseFloat(device.targetTemp),
+          timestamp: new Date().toISOString() // Add timestamp for graph updates
+        };
+        console.log('Processed device:', processed);
+        return processed;
+      });
+
+      console.log('Setting devices with processed data:', processedData);
+      setDevices(processedData);
+      setLastUpdate(new Date());
+    } catch (error) {
+      console.error('Error fetching devices:', error);
+      setError(error.message);
+      setLoading(false);
+    }
+  };
+
+  // Check auth status on mount
+  useEffect(() => {
+    checkAuth();
+  }, []);
+
+  // Set up polling with the configured interval
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    console.log('Setting up polling with interval:', pollInterval);
+    fetchDevices(); // Initial fetch
+    
+    let intervalId;
+    const setupPolling = () => {
+      if (!isPolling || !isAuthenticated) return;
+      
+      const currentInterval = retryCount > 0 
+        ? Math.min(BASE_INTERVAL * Math.pow(2, retryCount), 300000)
+        : pollInterval * 1000;
+
+      intervalId = setInterval(fetchDevices, currentInterval);
+    };
+
+    setupPolling();
+    
+    return () => {
+      console.log('Cleaning up polling interval');
+      clearInterval(intervalId);
+    };
+  }, [pollInterval, retryCount, isPolling, isAuthenticated]);
 
   // Convert Celsius to Fahrenheit
   const toFahrenheit = (celsius) => {
@@ -22,7 +155,7 @@ function App() {
   };
   
   // Format temperature based on selected unit
-  const formatTemp = (celsius) => {
+  const formatTemp = (celsius, useFahrenheit) => {
     if (celsius === undefined || celsius === null || celsius === 'N/A') {
       return 'N/A';
     }
@@ -74,103 +207,6 @@ function App() {
     return new Date(timestamp).toLocaleTimeString();
   };
 
-  // Fetch devices periodically
-  useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        console.log('Checking authentication status...');
-        const response = await fetch('/api/auth/status', {
-          method: 'GET',
-          credentials: 'include',
-          headers: {
-            'Accept': 'application/json'
-          }
-        });
-
-        const data = await response.json();
-        console.log('Auth response:', data);
-
-        if (data.authenticated) {
-          setIsAuthenticated(true);
-          await fetchDevices();
-        } else {
-          setIsAuthenticated(false);
-          setDevices([]); // Clear devices when not authenticated
-        }
-      } catch (err) {
-        console.error('Auth check error:', err);
-        setError(err.message);
-        setIsAuthenticated(false);
-        setDevices([]); // Clear devices on error
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    const fetchDevices = async () => {
-      try {
-        console.log('Fetching devices...');
-        const response = await fetch('/api/devices', {
-          method: 'GET',
-          credentials: 'include',
-          headers: {
-            'Accept': 'application/json'
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const data = await response.json();
-        console.log('Devices response:', data);
-
-        // Ensure data is an array
-        if (!Array.isArray(data)) {
-          console.error('Devices data is not an array:', data);
-          setDevices([]);
-          setError('Invalid devices data received from server');
-          return;
-        }
-
-        // Log each device's target temperature
-        data.forEach(device => {
-          console.log('Device target temp:', {
-            id: device.id,
-            name: device.name,
-            targetTemp: device.targetTemp,
-            traits: device.traits
-          });
-        });
-
-        // Ensure all temperature values are numbers or 'N/A'
-        const processedData = data.map(device => ({
-          ...device,
-          currentTemp: device.currentTemp === 'N/A' ? 'N/A' : Number(device.currentTemp),
-          targetTemp: device.targetTemp === 'N/A' ? 'N/A' : Number(device.targetTemp)
-        }));
-
-        setDevices(processedData);
-        setLastUpdate(Date.now());
-        
-        if (processedData.length > 0 && !selectedDevice) {
-          setSelectedDevice(processedData[0]);
-        }
-      } catch (err) {
-        console.error('Error fetching devices:', err);
-        setError(err.message);
-        setDevices([]);
-      }
-    };
-
-    checkAuth();
-
-    // Set up polling with configurable interval
-    const interval = setInterval(fetchDevices, pollInterval * 1000);
-
-    return () => clearInterval(interval);
-  }, [pollInterval]); // Add pollInterval as dependency
-
   const handleTempChange = async (device, newTemp) => {
     try {
       // Check if device is in ECO mode
@@ -218,7 +254,6 @@ function App() {
   const handleIncrement = async (device, increment) => {
     try {
       // Convert current temperature to Celsius if needed
-      // Handle both number and string temperature values
       const currentTemp = typeof device.targetTemp === 'number' ? device.targetTemp : 
         useFahrenheit ? (parseFloat(device.targetTemp) - 32) * 5/9 : parseFloat(device.targetTemp);
       
@@ -227,11 +262,9 @@ function App() {
       }
 
       // Calculate new temperature in Celsius
-      // The increment is already in Celsius, so we can add directly
       const newTemp = currentTemp + increment;
 
       // Validate temperature range (9-32°C or 48-90°F)
-      // Convert Fahrenheit limits to Celsius for comparison
       const minTemp = useFahrenheit ? (48 - 32) * 5/9 : 9;
       const maxTemp = useFahrenheit ? (90 - 32) * 5/9 : 32;
       
@@ -239,7 +272,7 @@ function App() {
         throw new Error(`Temperature must be between ${useFahrenheit ? '48°F' : '9°C'} and ${useFahrenheit ? '90°F' : '32°C'}`);
       }
 
-      // Update the temperature on the server
+      // Update the temperature
       const response = await fetch(`/api/devices/${device.id}/temperature`, {
         method: 'POST',
         headers: {
@@ -257,8 +290,8 @@ function App() {
         throw new Error(errorData.details || errorData.error || 'Failed to update temperature');
       }
 
-      const updatedDevices = await response.json();
-      setDevices(updatedDevices);
+      // Fetch updated device list to ensure all data is in sync
+      await fetchDevices();
     } catch (error) {
       console.error('Error updating temperature:', error);
       alert(`Failed to update temperature: ${error.message}`);
@@ -311,49 +344,40 @@ function App() {
     }
   };
 
-  const handleNameChange = async (device, newName) => {
+  const handleNameChange = async (deviceId, newName) => {
     try {
-      // Optimistic Update Pattern:
-      // 1. Update UI immediately for better user experience
-      // 2. Send request to server in background
-      // 3. Revert changes if server update fails
-      setDevices(prevDevices => 
-        prevDevices.map(d => 
-          d.id === device.id 
-            ? { ...d, name: newName }
-            : d
-        )
-      );
-      setEditingName(null);
-      setNewName('');
-
-      // Server update happens in background
-      const response = await fetch(`/api/devices/${device.id}/name`, {
+      console.log('Updating device name:', { deviceId, newName });
+      const response = await fetch(`/api/devices/${deviceId}/name`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ name: newName }),
-        credentials: 'include'
+        credentials: 'include',
+        body: JSON.stringify({ name: newName })
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        // Revert optimistic update if server request fails
-        setDevices(prevDevices => 
-          prevDevices.map(d => 
-            d.id === device.id 
-              ? { ...d, name: device.name }
-              : d
-          )
-        );
-        throw new Error(errorData.details || errorData.error || 'Failed to update name');
+        const data = await response.json();
+        throw new Error(data.error || 'Failed to update device name');
       }
 
-      // Let polling handle subsequent updates
+      // Update local state immediately for better UX
+      setDevices(prevDevices => 
+        prevDevices.map(device => 
+          device.id === deviceId 
+            ? { ...device, name: newName }
+            : device
+        )
+      );
+
+      // Fetch fresh data in the background
+      fetchDevices();
     } catch (error) {
-      console.error('Error updating name:', error);
-      alert(`Failed to update name: ${error.message}`);
+      console.error('Error updating device name:', error);
+      setError(error.message);
+    } finally {
+      setEditingName(null);
+      setNewName('');
     }
   };
 
@@ -481,7 +505,7 @@ function App() {
                           placeholder="New name"
                         />
                         <button
-                          onClick={() => handleNameChange(device, newName)}
+                          onClick={() => handleNameChange(device.id, newName)}
                           className="text-green-600 hover:text-green-900"
                         >
                           ✓
@@ -512,7 +536,7 @@ function App() {
                     )}
                   </td>
                   <td className="px-4 py-2 border text-center">
-                    {formatTemp(device.currentTemp)}
+                    {formatTemp(device.currentTemp, useFahrenheit)}
                   </td>
                   <td className="px-4 py-2 border">
                     <div className="flex items-center justify-center space-x-2">
@@ -523,7 +547,7 @@ function App() {
                         -
                       </button>
                       <span className="w-16 text-center">
-                        {formatTemp(device.targetTemp)}
+                        {formatTemp(device.targetTemp, useFahrenheit)}
                       </span>
                       <button
                         onClick={() => handleIncrement(device, tempIncrement)}
@@ -572,6 +596,27 @@ function App() {
           </table>
         </div>
       )}
+      
+      {/* Add polling status display */}
+      {pollError && (
+        <div className="mt-4 p-2 bg-yellow-100 text-yellow-800 rounded">
+          {pollError}
+        </div>
+      )}
+      
+      <div className="mt-8">
+        <h2 className="text-xl font-semibold mb-4">Temperature History</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {devices.map(device => (
+            <TemperatureGraph
+              key={device.id}
+              device={device}
+              useFahrenheit={useFahrenheit}
+              timestamp={device.timestamp} // Pass timestamp to force updates
+            />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

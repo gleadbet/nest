@@ -15,6 +15,7 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [editingName, setEditingName] = useState(null);
   const [newName, setNewName] = useState('');
+  const [updatingTemp, setUpdatingTemp] = useState(null);
   const BASE_INTERVAL = 60000;
 
   // Check authentication status
@@ -155,19 +156,12 @@ function App() {
   };
   
   // Format temperature based on selected unit
-  const formatTemp = (celsius, useFahrenheit) => {
-    if (celsius === undefined || celsius === null || celsius === 'N/A') {
-      return 'N/A';
-    }
-    const temp = parseFloat(celsius);
-    if (isNaN(temp)) {
-      return 'N/A';
-    }
-    if (useFahrenheit) {
-      const fahrenheit = toFahrenheit(temp);
-      return fahrenheit === 'N/A' ? 'N/A' : `${fahrenheit.toFixed(1)}°F`;
-    }
-    return `${temp.toFixed(1)}°C`;
+  const formatTemp = (temp, useFahrenheit) => {
+    if (temp === 'N/A' || temp === undefined || temp === null) return 'N/A';
+    const numTemp = parseFloat(temp);
+    if (isNaN(numTemp)) return 'N/A';
+    const convertedTemp = useFahrenheit ? (numTemp * 9/5) + 32 : numTemp;
+    return convertedTemp.toFixed(1);
   };
 
   // Get temperature from device traits
@@ -209,21 +203,11 @@ function App() {
 
   const handleTempChange = async (device, newTemp) => {
     try {
-      // Check if device is in ECO mode
-      if (device.mode === 'ECO') {
-        alert('Cannot set temperature while in ECO mode. Please change the thermostat mode to HEAT or COOL first.');
-        return;
-      }
-
-      // Convert to Celsius if using Fahrenheit
-      const tempToSend = useFahrenheit ? (newTemp - 32) * 5/9 : newTemp;
-      
-      console.log('Sending temperature update:', {
+      setUpdatingTemp(device.id);
+      console.log('Updating temperature:', {
         deviceId: device.id,
         newTemp,
-        tempToSend,
-        useFahrenheit,
-        mode: device.mode
+        useFahrenheit
       });
 
       const response = await fetch(`/api/devices/${device.id}/temperature`, {
@@ -231,23 +215,34 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          temperature: tempToSend,
-          useFahrenheit
-        }),
-        credentials: 'include'
+        credentials: 'include',
+        body: JSON.stringify({ 
+          temperature: newTemp,
+          useFahrenheit 
+        })
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.details || errorData.error || 'Failed to update temperature');
+        const data = await response.json();
+        throw new Error(data.details || data.error || 'Failed to update temperature');
       }
 
-      const updatedDevices = await response.json();
-      setDevices(updatedDevices);
+      // Update local state immediately for better UX
+      setDevices(prevDevices => 
+        prevDevices.map(d => 
+          d.id === device.id 
+            ? { ...d, targetTemp: newTemp }
+            : d
+        )
+      );
+
+      // Fetch fresh data in the background
+      fetchDevices();
     } catch (error) {
       console.error('Error updating temperature:', error);
-      alert(`Failed to update temperature: ${error.message}`);
+      setError(error.message);
+    } finally {
+      setUpdatingTemp(null);
     }
   };
 
@@ -491,7 +486,7 @@ function App() {
                 <th className="px-4 py-2 border">Actions</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="bg-white divide-y divide-gray-200">
               {deviceList.map(device => (
                 <tr key={device.id} className="hover:bg-gray-50">
                   <td className="px-4 py-2 border">
@@ -536,24 +531,66 @@ function App() {
                     )}
                   </td>
                   <td className="px-4 py-2 border text-center">
-                    {formatTemp(device.currentTemp, useFahrenheit)}
+                    {formatTemp(device.currentTemp, useFahrenheit)}°{useFahrenheit ? 'F' : 'C'}
                   </td>
                   <td className="px-4 py-2 border">
                     <div className="flex items-center justify-center space-x-2">
                       <button
-                        onClick={() => handleIncrement(device, -tempIncrement)}
-                        className="text-blue-500 hover:text-blue-700 px-2 py-1 border rounded"
+                        onClick={() => handleTempChange(device, device.targetTemp - tempIncrement)}
+                        disabled={updatingTemp === device.id || device.mode === 'ECO'}
+                        className={`
+                          px-3 py-1 rounded-lg font-semibold
+                          ${updatingTemp === device.id 
+                            ? 'bg-gray-300 cursor-not-allowed'
+                            : device.mode === 'ECO'
+                              ? 'bg-gray-300 cursor-not-allowed'
+                              : 'bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white'
+                          }
+                          transition-colors duration-200
+                          focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50
+                        `}
                       >
-                        -
+                        {updatingTemp === device.id ? (
+                          <span className="flex items-center">
+                            <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            Updating...
+                          </span>
+                        ) : (
+                          '-'
+                        )}
                       </button>
-                      <span className="w-16 text-center">
-                        {formatTemp(device.targetTemp, useFahrenheit)}
+                      <span className="w-16 text-center font-medium">
+                        {formatTemp(device.targetTemp, useFahrenheit)}°{useFahrenheit ? 'F' : 'C'}
                       </span>
                       <button
-                        onClick={() => handleIncrement(device, tempIncrement)}
-                        className="text-blue-500 hover:text-blue-700 px-2 py-1 border rounded"
+                        onClick={() => handleTempChange(device, device.targetTemp + tempIncrement)}
+                        disabled={updatingTemp === device.id || device.mode === 'ECO'}
+                        className={`
+                          px-3 py-1 rounded-lg font-semibold
+                          ${updatingTemp === device.id 
+                            ? 'bg-gray-300 cursor-not-allowed'
+                            : device.mode === 'ECO'
+                              ? 'bg-gray-300 cursor-not-allowed'
+                              : 'bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white'
+                          }
+                          transition-colors duration-200
+                          focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50
+                        `}
                       >
-                        +
+                        {updatingTemp === device.id ? (
+                          <span className="flex items-center">
+                            <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            Updating...
+                          </span>
+                        ) : (
+                          '+'
+                        )}
                       </button>
                     </div>
                   </td>

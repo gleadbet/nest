@@ -586,13 +586,18 @@ try {
       // Function to verify the temperature update
       const verifyTemperatureUpdate = async () => {
         // Wait longer for the initial change to be processed
+        // This is crucial because the Nest API sometimes takes a few seconds
+        // to fully process and reflect temperature changes
         await new Promise(resolve => setTimeout(resolve, 2000));
 
         let isVerified = false;
         let retryCount = 0;
-        const maxRetries = 5;
-        const retryDelay = 1000;
+        const maxRetries = 5;  // Allow up to 5 verification attempts
+        const retryDelay = 1000;  // Wait 1 second between retries
 
+        // Keep trying to verify the temperature update until successful
+        // or we run out of retries. This handles cases where the API
+        // takes longer to reflect the new temperature.
         while (!isVerified && retryCount < maxRetries) {
           const verifyResponse = await axios.get(
             `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
@@ -615,6 +620,9 @@ try {
             difference: Math.abs(currentTemp - tempValue)
           });
 
+          // Consider the update verified if the current temperature
+          // is within 0.1 degrees of the target temperature
+          // This accounts for any rounding or precision differences
           if (Math.abs(currentTemp - tempValue) < 0.1) {
             isVerified = true;
             console.log('Temperature update verified');
@@ -649,6 +657,8 @@ try {
       if (!isVerified) {
         console.log('Temperature update not verified after all retries');
         // Try one more time with a longer delay
+        // This final attempt helps handle edge cases where the API
+        // takes longer than expected to process the change
         await new Promise(resolve => setTimeout(resolve, 3000));
         const finalVerification = await verifyTemperatureUpdate();
         if (!finalVerification) {

@@ -22,6 +22,19 @@ A web-based thermostat control system for Nest devices, built with Express.js an
 
 ## Version History
 
+### Version 3.7 (2024-03-21)
+- Improved temperature setpoint persistence
+- Enhanced verification process for temperature changes
+- Added multiple verification attempts with configurable delays
+- Improved error handling and logging for temperature updates
+- Fixed issue where temperature changes required multiple attempts
+- Added robust temperature increment handling with:
+  - Initial 2-second delay for API processing
+  - Up to 5 verification attempts with 1-second intervals
+  - Final 3-second verification attempt for edge cases
+  - Temperature precision handling within 0.1°C
+  - Detailed logging of verification process
+
 ### Version 3.6
 - Added automatic token refresh handling
 - Implemented rate limiting protection
@@ -45,13 +58,6 @@ A web-based thermostat control system for Nest devices, built with Express.js an
 - Implemented Google Smart Device Management API integration
 - Added comprehensive device state management
 - Enhanced security with session-based authentication
-
-### v3.7 (2024-03-21)
-- Improved temperature setpoint persistence
-- Enhanced verification process for temperature changes
-- Added multiple verification attempts with configurable delays
-- Improved error handling and logging for temperature updates
-- Fixed issue where temperature changes required multiple attempts
 
 ## Installation and Setup
 

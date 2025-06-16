@@ -22,6 +22,13 @@ A web-based thermostat control system for Nest devices, built with Express.js an
 
 ## Version History
 
+### Version 3.6
+- Added automatic token refresh handling
+- Implemented rate limiting protection
+- Enhanced error handling for API limits
+- Improved caching mechanism for device data
+- Added better logging for debugging
+
 ### Version 3.5
 - Fixed ECO mode display and status in device list
 - Improved device state processing

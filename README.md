@@ -1,6 +1,6 @@
-# Temperature Monitoring System
+# Nest Thermostat Control System
 
-A real-time temperature monitoring system built with Next.js, featuring WebSocket support and REST API fallback.
+A web-based thermostat control system for Nest devices, built with Express.js and React, featuring real-time temperature monitoring and control capabilities.
 
 ## Requirements
 
@@ -8,28 +8,36 @@ A real-time temperature monitoring system built with Next.js, featuring WebSocke
 - npm >= 9.0.0
 - Git >= 2.0.0
 - A modern web browser (Chrome, Firefox, Safari, or Edge)
-- Google Cloud Platform account
-- Nest Developer account
+- Google Cloud Platform account with Smart Device Management API enabled
 
 ## Features
 
-- Real-time temperature monitoring via WebSocket
-- Automatic fallback to REST API polling
-- Temperature unit toggle (Fahrenheit/Celsius)
+- Real-time temperature monitoring and control
+- Support for multiple thermostat modes (HEAT, COOL, ECO)
+- Temperature unit display in Celsius
 - Custom device naming
-- Configurable update intervals
-- Secure authentication with token refresh handling
+- Secure Google OAuth2 authentication
+- Session-based authentication with automatic token refresh
+- Comprehensive error handling and rate limiting protection
 
 ## Version History
 
-### Version 2.0.0
-- Added comprehensive token refresh handling
-- Improved WebSocket reconnection logic
-- Enhanced error handling and retry mechanisms
-- Added detailed code documentation
+### Version 3.5
+- Fixed ECO mode display and status in device list
+- Improved device state processing
+- Enhanced error handling for mode changes
+- Added detailed logging for device state changes
 
-### Version 1.0.0
-- Initial release with basic temperature monitoring
+### Version 3.4
+- Fixed mode update endpoint to correctly handle ECO mode
+- Improved device state synchronization
+- Enhanced error handling for temperature updates
+
+### Version 3.0
+- Migrated to Express.js backend with React frontend
+- Implemented Google Smart Device Management API integration
+- Added comprehensive device state management
+- Enhanced security with session-based authentication
 
 ## Installation and Setup
 
@@ -52,15 +60,15 @@ npm install
 
 ### 3. Environment Configuration
 
-Create a `.env.local` file in the root directory with the following variables:
+Create a `.env` file in the root directory with the following variables:
 
 ```env
-NEXTAUTH_URL=http://localhost:3000
-NEXTAUTH_SECRET=your-secret-key
+SESSION_SECRET=your-session-secret
 GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
-NEST_CLIENT_ID=your-nest-client-id
-NEST_CLIENT_SECRET=your-nest-client-secret
+REDIRECT_URI=http://localhost:3000/auth/callback
+GOOGLE_PROJECT_ID=your-google-project-id
+PORT=3000
 ```
 
 ### 4. Google Cloud Platform Setup
@@ -71,22 +79,14 @@ NEST_CLIENT_SECRET=your-nest-client-secret
    - Google OAuth2 API
 3. Configure OAuth consent screen:
    - Add required scopes:
+     - `https://www.googleapis.com/auth/userinfo.profile`
+     - `https://www.googleapis.com/auth/userinfo.email`
      - `https://www.googleapis.com/auth/sdm.service`
-     - `https://www.googleapis.com/auth/sdm.devices.read`
 4. Create OAuth 2.0 credentials:
-   - Set authorized redirect URIs
+   - Set authorized redirect URIs to match your REDIRECT_URI
    - Download client credentials
 
-### 5. Nest Developer Setup
-
-1. Create a Nest Developer account
-2. Create a new project
-3. Configure OAuth settings:
-   - Set redirect URIs
-   - Configure allowed domains
-4. Note down client ID and secret
-
-### 6. Running the Application
+### 5. Running the Application
 
 #### Development Mode
 ```bash
@@ -105,49 +105,84 @@ npm run build
 npm start
 ```
 
-### 7. Running Tests
-```bash
-# Run unit tests
-npm test
-
-# Run with coverage
-npm run test:coverage
-```
-
 ## API Routes
 
-- `/api/devices/[deviceId]` - Device data endpoint
-- `/api/devices/[deviceId]/temperature-history` - Historical temperature data
-- `/api/socket` - WebSocket connection endpoint
-- `/api/socketio` - Socket.IO connection endpoint
+- `/api/devices` - Get list of all thermostats
+- `/api/devices/:deviceId/mode` - Change thermostat mode
+- `/api/devices/:deviceId/temperature` - Update temperature setpoint
+- `/api/devices/:deviceId/name` - Update custom device name
+- `/api/devices/:deviceId/debug` - Get detailed device information
+- `/auth/login` - Google OAuth login
+- `/auth/callback` - OAuth callback handler
+- `/auth/logout` - Logout endpoint
 
 ## Authentication and Authorization
 
-### Token Management
+### Session Management
 
-1. **Access Tokens**
-   - Short-lived (1 hour)
-   - Automatically refreshed using refresh tokens
-   - Stored securely in session
+1. **Session Configuration**
+   - Secure session storage
+   - 24-hour session duration
+   - Automatic token refresh handling
 
-2. **Refresh Tokens**
-   - Long-lived (up to 6 months)
-   - Used to obtain new access tokens
-   - Stored securely in database
+2. **OAuth2 Flow**
+   - Google OAuth2 authentication
+   - Secure token storage in session
+   - Automatic token refresh
 
-3. **Token Refresh Flow**
-   ```typescript
-   // Automatic refresh handled by NextAuth
-   const { data: session } = useSession();
-   
-   // Manual refresh if needed
-   const refreshToken = async () => {
-     await signIn('google', { callbackUrl: '/' });
-   };
-   ```
+3. **Security Features**
+   - CSRF protection
+   - Secure cookie settings
+   - Rate limiting protection
 
-### Authorization Scopes
+## Device Control Features
 
-Required OAuth scopes:
-- `https://www.googleapis.com/auth/sdm.service`
-- `https://www.googleapis.com/auth/sdm.devices.read`
+### Thermostat Modes
+
+1. **HEAT Mode**
+   - Single temperature setpoint
+   - Heating system control
+   - Temperature range: 9-32°C
+
+2. **COOL Mode**
+   - Single temperature setpoint
+   - Cooling system control
+   - Temperature range: 9-32°C
+
+3. **ECO Mode**
+   - Dual temperature setpoints (heat/cool)
+   - Energy-saving operation
+   - Automatic mode selection based on temperature
+
+### Device Information
+
+Each thermostat provides:
+- Current temperature
+- Target temperature
+- Current mode
+- System status
+- Humidity level
+- Available modes
+- ECO mode support status
+
+## Error Handling
+
+The system includes comprehensive error handling for:
+- API rate limiting
+- Authentication failures
+- Invalid mode changes
+- Temperature range violations
+- Network connectivity issues
+- Session management
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.

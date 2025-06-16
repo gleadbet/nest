@@ -185,17 +185,51 @@ try {
     });
   });
 
+  // Add token refresh function
+  async function refreshAccessToken(refreshToken) {
+    try {
+      const response = await oauth2Client.getAccessToken();
+      return response.token;
+    } catch (error) {
+      console.error('Error refreshing access token:', error);
+      throw error;
+    }
+  }
+
+  // Add rate limiting variables
+  const RATE_LIMIT_WINDOW = 60000; // 1 minute
+  const MAX_REQUESTS_PER_WINDOW = 60; // 60 requests per minute
+  let requestCount = 0;
+  let windowStart = Date.now();
+
   async function fetchDeviceList(accessToken, forceRefresh = false) {
     const now = Date.now();
     
+    // Reset rate limit window if needed
+    if (now - windowStart > RATE_LIMIT_WINDOW) {
+      requestCount = 0;
+      windowStart = now;
+    }
+
+    // Check rate limit
+    if (requestCount >= MAX_REQUESTS_PER_WINDOW) {
+      console.log('Rate limit reached, using cached data');
+      if (deviceListCache) {
+        return deviceListCache;
+      }
+      throw new Error('Rate limit reached and no cached data available');
+    }
+
     // Return cached list if it's fresh enough
     if (!forceRefresh && deviceListCache && (now - lastDeviceListFetch) < CACHE_DURATION) {
-      console.log('Returning cached device list:', deviceListCache);
+      console.log('Returning cached device list');
       return deviceListCache;
     }
 
     try {
       console.log('Fetching fresh device list...');
+      requestCount++;
+      
       const response = await axios.get(
         `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices`,
         {
@@ -219,11 +253,30 @@ try {
       return response.data.devices;
     } catch (error) {
       console.error('Error fetching device list:', error);
+      
+      // Handle token expiration
+      if (error.response?.status === 401) {
+        console.log('Token expired, attempting to refresh...');
+        try {
+          const newToken = await refreshAccessToken(req.session.tokens.refresh_token);
+          req.session.tokens.access_token = newToken;
+          req.session.accessToken = newToken;
+          await req.session.save();
+          
+          // Retry the request with new token
+          return fetchDeviceList(newToken, forceRefresh);
+        } catch (refreshError) {
+          console.error('Failed to refresh token:', refreshError);
+          throw new Error('Authentication failed. Please login again.');
+        }
+      }
+      
       // If we have cached data and the error is rate limiting, return cached data
-      if (error.response?.status === 429 && deviceListCache) {
-        console.log('Rate limited, returning cached data:', deviceListCache);
+      if ((error.response?.status === 429 || error.response?.status === 403) && deviceListCache) {
+        console.log('Rate limited, returning cached data');
         return deviceListCache;
       }
+      
       throw error;
     }
   }

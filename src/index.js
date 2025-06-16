@@ -186,10 +186,18 @@ try {
   });
 
   // Add token refresh function
-  async function refreshAccessToken(refreshToken) {
+  async function refreshAccessToken(session) {
     try {
-      const response = await oauth2Client.getAccessToken();
-      return response.token;
+      if (!session?.tokens?.refresh_token) {
+        throw new Error('No refresh token available');
+      }
+
+      oauth2Client.setCredentials({
+        refresh_token: session.tokens.refresh_token
+      });
+
+      const { credentials } = await oauth2Client.refreshAccessToken();
+      return credentials.access_token;
     } catch (error) {
       console.error('Error refreshing access token:', error);
       throw error;
@@ -202,7 +210,7 @@ try {
   let requestCount = 0;
   let windowStart = Date.now();
 
-  async function fetchDeviceList(accessToken, forceRefresh = false) {
+  async function fetchDeviceList(accessToken, forceRefresh = false, session = null) {
     const now = Date.now();
     
     // Reset rate limit window if needed
@@ -255,16 +263,23 @@ try {
       console.error('Error fetching device list:', error);
       
       // Handle token expiration
-      if (error.response?.status === 401) {
+      if (error.response?.status === 401 && session) {
         console.log('Token expired, attempting to refresh...');
         try {
-          const newToken = await refreshAccessToken(req.session.tokens.refresh_token);
-          req.session.tokens.access_token = newToken;
-          req.session.accessToken = newToken;
-          await req.session.save();
+          const newToken = await refreshAccessToken(session);
+          if (session) {
+            session.tokens.access_token = newToken;
+            session.accessToken = newToken;
+            await new Promise((resolve, reject) => {
+              session.save((err) => {
+                if (err) reject(err);
+                else resolve();
+              });
+            });
+          }
           
           // Retry the request with new token
-          return fetchDeviceList(newToken, forceRefresh);
+          return fetchDeviceList(newToken, forceRefresh, session);
         } catch (refreshError) {
           console.error('Failed to refresh token:', refreshError);
           throw new Error('Authentication failed. Please login again.');
@@ -295,7 +310,7 @@ try {
       }
 
       console.log('Fetching devices with token:', accessToken.substring(0, 10) + '...');
-      const devices = await fetchDeviceList(accessToken);
+      const devices = await fetchDeviceList(accessToken, false, req.session);
       console.log('Raw devices from API:', devices);
 
       const thermostats = devices
@@ -436,7 +451,7 @@ try {
       });
 
       // Fetch updated device list with force refresh
-      const devices = await fetchDeviceList(accessToken, true);
+      const devices = await fetchDeviceList(accessToken, true, req.session);
 
       const thermostats = devices
         .filter(device => device.type === 'sdm.devices.types.THERMOSTAT')
@@ -527,48 +542,90 @@ try {
 
       const device = deviceResponse.data;
       const traits = device.traits || {};
-      const mode = traits['sdm.devices.traits.ThermostatMode']?.mode || 'HEAT';
+      const thermostatModeTrait = traits['sdm.devices.traits.ThermostatMode'] || {};
+      const ecoTrait = traits['sdm.devices.traits.ThermostatEco'] || {};
+      const baseMode = thermostatModeTrait.mode || 'HEAT';
+      const isEcoMode = ecoTrait.mode === 'MANUAL_ECO';
 
-      // Check if device is in ECO mode
-      if (mode === 'ECO') {
-        return res.status(400).json({ 
-          error: 'Cannot set temperature while in ECO mode',
-          details: 'Please change the thermostat mode to HEAT or COOL first'
-        });
+      // If in ECO mode, we need to disable it first
+      if (isEcoMode) {
+        console.log('Device is in ECO mode, disabling before setting temperature');
+        await axios.post(
+          `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}:executeCommand`,
+          {
+            command: 'sdm.devices.commands.ThermostatEco.SetMode',
+            params: { mode: 'OFF' }
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+        
+        // Wait for ECO mode to be disabled
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
       // Determine which command to use based on mode
       let command, params;
-      if (mode === 'COOL') {
+      if (baseMode === 'COOL') {
         command = 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetCool';
         params = { coolCelsius: tempValue };
-      } else if (mode === 'HEAT') {
+      } else if (baseMode === 'HEAT') {
         command = 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetHeat';
         params = { heatCelsius: tempValue };
       } else {
         return res.status(400).json({ 
           error: 'Unsupported thermostat mode',
-          details: `Cannot set temperature in ${mode} mode`
+          details: `Cannot set temperature in ${baseMode} mode`
         });
       }
 
       // Function to verify the temperature update
       const verifyTemperatureUpdate = async () => {
-        const verifyResponse = await axios.get(
-          `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
-          {
-            headers: {
-              Authorization: `Bearer ${accessToken}`
+        // Wait longer for the initial change to be processed
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        let isVerified = false;
+        let retryCount = 0;
+        const maxRetries = 5;
+        const retryDelay = 1000;
+
+        while (!isVerified && retryCount < maxRetries) {
+          const verifyResponse = await axios.get(
+            `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
+            {
+              headers: {
+                Authorization: `Bearer ${accessToken}`
+              }
             }
+          );
+          
+          const currentTraits = verifyResponse.data.traits || {};
+          const currentTemp = baseMode === 'COOL' 
+            ? currentTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius
+            : currentTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius;
+          
+          console.log('Verifying temperature update:', {
+            attempt: retryCount + 1,
+            currentTemp,
+            targetTemp: tempValue,
+            difference: Math.abs(currentTemp - tempValue)
+          });
+
+          if (Math.abs(currentTemp - tempValue) < 0.1) {
+            isVerified = true;
+            console.log('Temperature update verified');
+          } else {
+            console.log('Temperature update not verified, retrying...');
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            retryCount++;
           }
-        );
-        
-        const currentTraits = verifyResponse.data.traits || {};
-        const currentTemp = mode === 'COOL' 
-          ? currentTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius
-          : currentTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius;
-        
-        return Math.abs(currentTemp - tempValue) < 0.1;
+        }
+
+        return isVerified;
       };
 
       // Update the temperature using the Smart Device Management API
@@ -587,42 +644,22 @@ try {
 
       console.log('Temperature update response:', response.data);
 
-      // Wait for a short delay to allow the update to propagate
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
       // Verify the update was successful
-      let isVerified = false;
-      let retryCount = 0;
-      const maxRetries = 3;
-
-      while (!isVerified && retryCount < maxRetries) {
-        isVerified = await verifyTemperatureUpdate();
-        if (!isVerified) {
-          console.log(`Temperature update not verified, retry ${retryCount + 1}/${maxRetries}`);
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          retryCount++;
-        }
-      }
-
+      const isVerified = await verifyTemperatureUpdate();
       if (!isVerified) {
-        console.log('Temperature update not verified after retries, proceeding with device list fetch');
+        console.log('Temperature update not verified after all retries');
+        // Try one more time with a longer delay
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        const finalVerification = await verifyTemperatureUpdate();
+        if (!finalVerification) {
+          console.log('Temperature update still not verified after final attempt');
+        }
       }
 
       // Fetch updated device list
-      const devicesResponse = await axios.get(
-        `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices`,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`
-          }
-        }
-      );
+      const devices = await fetchDeviceList(accessToken, true, req.session);
 
-      if (!devicesResponse.data?.devices) {
-        return res.json([]);
-      }
-
-      const thermostats = devicesResponse.data.devices
+      const thermostats = devices
         .filter(device => device.type === 'sdm.devices.types.THERMOSTAT')
         .map(device => {
           const deviceId = device.name.split('/').pop();
@@ -704,8 +741,8 @@ try {
               ? Number(traits['sdm.devices.traits.Temperature'].ambientTemperatureCelsius.toFixed(1))
               : 'N/A',
             targetTemp: targetTemp,
-            mode: isEcoMode ? `ECO (${baseMode})` : baseMode,
-            status: isEcoMode ? 'IDLE' : (hvacTrait.status || 'IDLE'),
+            mode: mode,
+            status: status,
             humidity: typeof traits['sdm.devices.traits.Humidity']?.ambientHumidityPercent === 'number'
               ? Number(traits['sdm.devices.traits.Humidity'].ambientHumidityPercent.toFixed(1))
               : 'N/A',

@@ -46,6 +46,13 @@ A web-based thermostat control system for Nest devices, built with Express.js an
 - Added comprehensive device state management
 - Enhanced security with session-based authentication
 
+### v3.7 (2024-03-21)
+- Improved temperature setpoint persistence
+- Enhanced verification process for temperature changes
+- Added multiple verification attempts with configurable delays
+- Improved error handling and logging for temperature updates
+- Fixed issue where temperature changes required multiple attempts
+
 ## Installation and Setup
 
 ### 1. Clone the Repository

@@ -9,6 +9,7 @@ A web-based thermostat control system for Nest devices, built with Express.js an
 - Git >= 2.0.0
 - A modern web browser (Chrome, Firefox, Safari, or Edge)
 - Google Cloud Platform account with Smart Device Management API enabled
+- MongoDB (v4.4 or higher)
 
 ## Features
 
@@ -59,7 +60,45 @@ A web-based thermostat control system for Nest devices, built with Express.js an
 - Added comprehensive device state management
 - Enhanced security with session-based authentication
 
+### v3.8 (2024-03-21)
+- Improved rate limiting handling for temperature updates
+- Added per-endpoint rate limit tracking
+- Enhanced error recovery for rate limit errors
+- Reduced API request limits to prevent throttling
+- Added better error messages with retry information
+
 ## Installation and Setup
+
+### Prerequisites
+- Node.js (v14 or higher)
+- MongoDB (v4.4 or higher)
+- Google Cloud Platform account with Smart Device Management API enabled
+
+### Environment Variables
+Create a `.env` file in the root directory with the following variables:
+```env
+SESSION_SECRET=your_session_secret
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+REDIRECT_URI=your_redirect_uri
+GOOGLE_PROJECT_ID=your_project_id
+MONGODB_URI=mongodb://localhost:27017/thermostat
+PORT=3000
+```
+
+### Database Setup
+The application uses MongoDB to store thermostat data and history. The database schema includes:
+- Current thermostat state
+- Historical data (last 100 entries per device)
+- Timestamps for all readings
+- Indexed fields for efficient querying
+
+To set up MongoDB:
+1. Install MongoDB on your system
+2. Create a database named 'thermostat'
+3. The application will automatically create the necessary collections and indexes
+
+### Installation Steps
 
 ### 1. Clone the Repository
 
@@ -78,20 +117,7 @@ cd nest
 npm install
 ```
 
-### 3. Environment Configuration
-
-Create a `.env` file in the root directory with the following variables:
-
-```env
-SESSION_SECRET=your-session-secret
-GOOGLE_CLIENT_ID=your-google-client-id
-GOOGLE_CLIENT_SECRET=your-google-client-secret
-REDIRECT_URI=http://localhost:3000/auth/callback
-GOOGLE_PROJECT_ID=your-google-project-id
-PORT=3000
-```
-
-### 4. Google Cloud Platform Setup
+### 3. Google Cloud Platform Setup
 
 1. Create a new project in Google Cloud Console
 2. Enable the following APIs:
@@ -106,7 +132,7 @@ PORT=3000
    - Set authorized redirect URIs to match your REDIRECT_URI
    - Download client credentials
 
-### 5. Running the Application
+### 4. Running the Application
 
 #### Development Mode
 ```bash
@@ -135,6 +161,16 @@ npm start
 - `/auth/login` - Google OAuth login
 - `/auth/callback` - OAuth callback handler
 - `/auth/logout` - Logout endpoint
+
+## API Endpoints
+
+### Device History
+- `GET /api/devices/:deviceId/history`
+  - Returns historical data for a specific device
+  - Optional query parameters:
+    - `startDate`: Filter data from this date (ISO format)
+    - `endDate`: Filter data until this date (ISO format)
+  - Returns up to 100 most recent entries
 
 ## Authentication and Authorization
 

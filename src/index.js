@@ -192,11 +192,38 @@ try {
         throw new Error('No refresh token available');
       }
 
-      oauth2Client.setCredentials({
+      // Create a new OAuth2 client instance for the refresh
+      const refreshClient = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID?.trim(),
+        process.env.GOOGLE_CLIENT_SECRET?.trim(),
+        process.env.REDIRECT_URI?.trim()
+      );
+
+      // Set the refresh token
+      refreshClient.setCredentials({
         refresh_token: session.tokens.refresh_token
       });
 
-      const { credentials } = await oauth2Client.refreshAccessToken();
+      // Get new tokens
+      const { credentials } = await refreshClient.refreshAccessToken();
+      
+      // Update session with new tokens
+      session.tokens = {
+        ...session.tokens,
+        access_token: credentials.access_token,
+        expiry_date: credentials.expiry_date
+      };
+      session.accessToken = credentials.access_token;
+
+      // Save session
+      await new Promise((resolve, reject) => {
+        session.save((err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+
+      console.log('Successfully refreshed access token');
       return credentials.access_token;
     } catch (error) {
       console.error('Error refreshing access token:', error);
@@ -206,9 +233,33 @@ try {
 
   // Add rate limiting variables
   const RATE_LIMIT_WINDOW = 60000; // 1 minute
-  const MAX_REQUESTS_PER_WINDOW = 60; // 60 requests per minute
-  let requestCount = 0;
-  let windowStart = Date.now();
+  const MAX_REQUESTS_PER_WINDOW = 30; // Reduced to 30 requests per minute to be safer
+  const rateLimitCounters = {
+    temperature: { count: 0, windowStart: Date.now() },
+    mode: { count: 0, windowStart: Date.now() },
+    devices: { count: 0, windowStart: Date.now() }
+  };
+
+  // Add rate limit check function
+  function checkRateLimit(endpoint) {
+    const now = Date.now();
+    const counter = rateLimitCounters[endpoint];
+    
+    // Reset counter if window has passed
+    if (now - counter.windowStart > RATE_LIMIT_WINDOW) {
+      counter.count = 0;
+      counter.windowStart = now;
+    }
+    
+    // Check if we're over the limit
+    if (counter.count >= MAX_REQUESTS_PER_WINDOW) {
+      const timeToWait = RATE_LIMIT_WINDOW - (now - counter.windowStart);
+      throw new Error(`Rate limit exceeded. Please wait ${Math.ceil(timeToWait / 1000)} seconds before trying again.`);
+    }
+    
+    counter.count++;
+    return true;
+  }
 
   async function fetchDeviceList(accessToken, forceRefresh = false, session = null) {
     const now = Date.now();
@@ -267,21 +318,20 @@ try {
         console.log('Token expired, attempting to refresh...');
         try {
           const newToken = await refreshAccessToken(session);
-          if (session) {
-            session.tokens.access_token = newToken;
-            session.accessToken = newToken;
-            await new Promise((resolve, reject) => {
-              session.save((err) => {
-                if (err) reject(err);
-                else resolve();
-              });
-            });
-          }
           
           // Retry the request with new token
           return fetchDeviceList(newToken, forceRefresh, session);
         } catch (refreshError) {
           console.error('Failed to refresh token:', refreshError);
+          // Clear session on refresh failure
+          session.tokens = null;
+          session.accessToken = null;
+          await new Promise((resolve, reject) => {
+            session.save((err) => {
+              if (err) reject(err);
+              else resolve();
+            });
+          });
           throw new Error('Authentication failed. Please login again.');
         }
       }
@@ -293,6 +343,71 @@ try {
       }
       
       throw error;
+    }
+  }
+
+  // Add token expiration check middleware
+  app.use(async (req, res, next) => {
+    if (req.session?.tokens?.expiry_date) {
+      const expiryDate = new Date(req.session.tokens.expiry_date);
+      const now = new Date();
+      
+      // If token expires in less than 5 minutes, refresh it
+      if (expiryDate.getTime() - now.getTime() < 300000) {
+        try {
+          await refreshAccessToken(req.session);
+        } catch (error) {
+          console.error('Error refreshing token in middleware:', error);
+          // Don't throw error here, let the request continue
+          // The specific endpoint will handle auth errors
+        }
+      }
+    }
+    next();
+  });
+
+  // Function to store thermostat data
+  async function storeThermostatData(device) {
+    try {
+      const thermostatData = {
+        deviceId: device.id,
+        name: device.name,
+        currentTemp: device.currentTemp,
+        targetTemp: device.targetTemp,
+        mode: device.mode,
+        status: device.status,
+        humidity: device.humidity,
+        timestamp: new Date()
+      };
+
+      // Add to history array
+      thermostatData.history = [{
+        currentTemp: device.currentTemp,
+        targetTemp: device.targetTemp,
+        mode: device.mode,
+        status: device.status,
+        humidity: device.humidity,
+        timestamp: new Date()
+      }];
+
+      // Update or insert the document
+      await Thermostat.findOneAndUpdate(
+        { deviceId: device.id },
+        { 
+          $set: thermostatData,
+          $push: { 
+            history: {
+              $each: thermostatData.history,
+              $slice: -100 // Keep last 100 history entries
+            }
+          }
+        },
+        { upsert: true, new: true }
+      );
+
+      console.log('Stored thermostat data for device:', device.id);
+    } catch (error) {
+      console.error('Error storing thermostat data:', error);
     }
   }
 
@@ -374,6 +489,10 @@ try {
           };
 
           console.log('Processed device:', processedDevice);
+
+          // Store the processed device data
+          storeThermostatData(processedDevice);
+
           return processedDevice;
         });
 
@@ -503,6 +622,9 @@ try {
         });
       }
 
+      // Check rate limit before proceeding
+      checkRateLimit('temperature');
+
       const { deviceId } = req.params;
       const { temperature } = req.body;
 
@@ -583,59 +705,6 @@ try {
         });
       }
 
-      // Function to verify the temperature update
-      const verifyTemperatureUpdate = async () => {
-        // Wait longer for the initial change to be processed
-        // This is crucial because the Nest API sometimes takes a few seconds
-        // to fully process and reflect temperature changes
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        let isVerified = false;
-        let retryCount = 0;
-        const maxRetries = 5;  // Allow up to 5 verification attempts
-        const retryDelay = 1000;  // Wait 1 second between retries
-
-        // Keep trying to verify the temperature update until successful
-        // or we run out of retries. This handles cases where the API
-        // takes longer to reflect the new temperature.
-        while (!isVerified && retryCount < maxRetries) {
-          const verifyResponse = await axios.get(
-            `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
-            {
-              headers: {
-                Authorization: `Bearer ${accessToken}`
-              }
-            }
-          );
-          
-          const currentTraits = verifyResponse.data.traits || {};
-          const currentTemp = baseMode === 'COOL' 
-            ? currentTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius
-            : currentTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius;
-          
-          console.log('Verifying temperature update:', {
-            attempt: retryCount + 1,
-            currentTemp,
-            targetTemp: tempValue,
-            difference: Math.abs(currentTemp - tempValue)
-          });
-
-          // Consider the update verified if the current temperature
-          // is within 0.1 degrees of the target temperature
-          // This accounts for any rounding or precision differences
-          if (Math.abs(currentTemp - tempValue) < 0.1) {
-            isVerified = true;
-            console.log('Temperature update verified');
-          } else {
-            console.log('Temperature update not verified, retrying...');
-            await new Promise(resolve => setTimeout(resolve, retryDelay));
-            retryCount++;
-          }
-        }
-
-        return isVerified;
-      };
-
       // Update the temperature using the Smart Device Management API
       const response = await axios.post(
         `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}:executeCommand`,
@@ -652,122 +721,73 @@ try {
 
       console.log('Temperature update response:', response.data);
 
-      // Verify the update was successful
-      const isVerified = await verifyTemperatureUpdate();
-      if (!isVerified) {
-        console.log('Temperature update not verified after all retries');
-        // Try one more time with a longer delay
-        // This final attempt helps handle edge cases where the API
-        // takes longer than expected to process the change
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        const finalVerification = await verifyTemperatureUpdate();
-        if (!finalVerification) {
-          console.log('Temperature update still not verified after final attempt');
+      // Wait for the change to be processed
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Return the current device state instead of fetching all devices
+      const updatedDeviceResponse = await axios.get(
+        `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`
+          }
         }
+      );
+
+      const updatedDevice = updatedDeviceResponse.data;
+      const updatedTraits = updatedDevice.traits || {};
+      const updatedThermostatModeTrait = updatedTraits['sdm.devices.traits.ThermostatMode'] || {};
+      const updatedEcoTrait = updatedTraits['sdm.devices.traits.ThermostatEco'] || {};
+      const updatedHvacTrait = updatedTraits['sdm.devices.traits.ThermostatHvac'] || {};
+      
+      const isUpdatedEcoMode = updatedEcoTrait.mode === 'MANUAL_ECO';
+      const updatedBaseMode = updatedThermostatModeTrait.mode || 'OFF';
+      const updatedMode = isUpdatedEcoMode ? `ECO (${updatedBaseMode})` : updatedBaseMode;
+
+      let updatedTargetTemp = 'N/A';
+      if (isUpdatedEcoMode) {
+        const heatTemp = typeof updatedEcoTrait.heatCelsius === 'number' ? Number(updatedEcoTrait.heatCelsius.toFixed(1)) : 'N/A';
+        const coolTemp = typeof updatedEcoTrait.coolCelsius === 'number' ? Number(updatedEcoTrait.coolCelsius.toFixed(1)) : 'N/A';
+        updatedTargetTemp = `ECO (${heatTemp}°C - ${coolTemp}°C)`;
+      } else if (updatedBaseMode === 'COOL') {
+        const temp = updatedTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius;
+        updatedTargetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
+      } else if (updatedBaseMode === 'HEAT') {
+        const temp = updatedTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius;
+        updatedTargetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
       }
 
-      // Fetch updated device list
-      const devices = await fetchDeviceList(accessToken, true, req.session);
-
-      const thermostats = devices
-        .filter(device => device.type === 'sdm.devices.types.THERMOSTAT')
-        .map(device => {
-          const deviceId = device.name.split('/').pop();
-          const traits = device.traits || {};
-          const thermostatModeTrait = traits['sdm.devices.traits.ThermostatMode'] || {};
-          const ecoTrait = traits['sdm.devices.traits.ThermostatEco'] || {};
-          const hvacTrait = traits['sdm.devices.traits.ThermostatHvac'] || {};
-          
-          // Check if device is in ECO mode
-          const isEcoMode = ecoTrait.mode === 'MANUAL_ECO';
-          
-          // Get the base mode (HEAT/COOL/OFF) and ECO state
-          const baseMode = thermostatModeTrait.mode || 'OFF';
-          const mode = isEcoMode ? `ECO (${baseMode})` : baseMode;
-          const availableModes = thermostatModeTrait.availableModes || ['HEAT', 'COOL', 'HEATCOOL', 'OFF'];
-          
-          // Check if device supports ECO mode
-          const hasEcoTrait = !!traits['sdm.devices.traits.ThermostatEco'];
-          const ecoMode = hasEcoTrait ? 'ECO' : null;
-          
-          // Add ECO to available modes if supported
-          const allAvailableModes = ecoMode ? [...availableModes, ecoMode] : availableModes;
-
-          // Determine device status
-          let status = 'UNKNOWN';
-          if (hvacTrait.status) {
-            status = hvacTrait.status;
-          } else if (isEcoMode) {
-            status = 'IDLE';  // Default to IDLE when in ECO mode
-          }
-          
-          console.log('Processing device modes:', {
-            deviceId,
-            mode,
-            baseMode,
-            isEcoMode,
-            ecoTraitMode: ecoTrait.mode,
-            thermostatMode: thermostatModeTrait.mode,
-            hvacStatus: hvacTrait.status,
-            status,
-            availableModes,
-            hasEcoTrait,
-            ecoMode,
-            allAvailableModes,
-            thermostatModeTrait,
-            ecoTrait,
-            allTraits: Object.keys(traits)
-          });
-
-          // Get target temperature based on mode
-          let targetTemp = 'N/A';
-          if (isEcoMode) {
-            const heatTemp = typeof ecoTrait.heatCelsius === 'number' ? Number(ecoTrait.heatCelsius.toFixed(1)) : 'N/A';
-            const coolTemp = typeof ecoTrait.coolCelsius === 'number' ? Number(ecoTrait.coolCelsius.toFixed(1)) : 'N/A';
-            targetTemp = `ECO (${heatTemp}°C - ${coolTemp}°C)`;
-          } else if (baseMode === 'COOL') {
-            const temp = traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius;
-            targetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
-          } else if (baseMode === 'HEAT') {
-            const temp = traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius;
-            targetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
-          }
-
-          // Get the device name, handling both custom names and default names
-          let deviceName = req.session.customNames?.[deviceId];
-          if (!deviceName) {
-            // Try to get name from Info trait first
-            deviceName = traits['sdm.devices.traits.Info']?.customName;
-            // If no custom name in Info trait, use the last part of the device name
-            if (!deviceName) {
-              deviceName = device.name.split('/').pop();
-            }
-          }
-
-          const processedDevice = {
-            id: deviceId,
-            name: deviceName,
-            currentTemp: typeof traits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius === 'number' 
-              ? Number(traits['sdm.devices.traits.Temperature'].ambientTemperatureCelsius.toFixed(1))
-              : 'N/A',
-            targetTemp: targetTemp,
-            mode: mode,
-            status: status,
-            humidity: typeof traits['sdm.devices.traits.Humidity']?.ambientHumidityPercent === 'number'
-              ? Number(traits['sdm.devices.traits.Humidity'].ambientHumidityPercent.toFixed(1))
-              : 'N/A',
-            availableModes: allAvailableModes,
-            hasEcoTrait: hasEcoTrait
-          };
-
-          console.log('Processed device:', processedDevice);
-          return processedDevice;
-        });
+      const processedDevice = {
+        id: deviceId,
+        name: req.session.customNames?.[deviceId] || updatedDevice.name.split('/').pop(),
+        currentTemp: typeof updatedTraits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius === 'number' 
+          ? Number(updatedTraits['sdm.devices.traits.Temperature'].ambientTemperatureCelsius.toFixed(1))
+          : 'N/A',
+        targetTemp: updatedTargetTemp,
+        mode: updatedMode,
+        status: updatedHvacTrait.status || 'IDLE',
+        humidity: typeof updatedTraits['sdm.devices.traits.Humidity']?.ambientHumidityPercent === 'number'
+          ? Number(updatedTraits['sdm.devices.traits.Humidity'].ambientHumidityPercent.toFixed(1))
+          : 'N/A',
+        availableModes: updatedThermostatModeTrait.availableModes || ['HEAT', 'COOL', 'HEATCOOL', 'OFF'],
+        hasEcoTrait: !!updatedTraits['sdm.devices.traits.ThermostatEco']
+      };
 
       res.setHeader('Content-Type', 'application/json');
-      res.json(thermostats);
+      res.json([processedDevice]);
     } catch (error) {
       console.error('Error updating temperature:', error);
+      
+      // Handle rate limit error specifically
+      if (error.response?.status === 429 || error.message.includes('Rate limit exceeded')) {
+        const retryAfter = error.response?.headers?.['retry-after'] || 60;
+        return res.status(429).json({ 
+          error: 'Rate limit exceeded',
+          details: `Please wait ${retryAfter} seconds before trying again`,
+          retryAfter: parseInt(retryAfter)
+        });
+      }
+      
       res.status(error.response?.status || 500).json({ 
         error: 'Failed to update temperature',
         details: error.message,
@@ -1009,8 +1029,8 @@ try {
               ? Number(traits['sdm.devices.traits.Temperature'].ambientTemperatureCelsius.toFixed(1))
               : 'N/A',
             targetTemp: targetTemp,
-            mode: isEcoMode ? `ECO (${baseMode})` : baseMode,
-            status: isEcoMode ? 'IDLE' : (hvacTrait.status || 'IDLE'),
+            mode: mode,
+            status: status,
             humidity: typeof traits['sdm.devices.traits.Humidity']?.ambientHumidityPercent === 'number'
               ? Number(traits['sdm.devices.traits.Humidity'].ambientHumidityPercent.toFixed(1))
               : 'N/A',
@@ -1182,12 +1202,18 @@ try {
         const tokens = tokenResponse.res;
         console.log('Tokens received:', { 
           access_token: tokens.access_token ? 'present' : 'missing',
-          refresh_token: tokens.refresh_token ? 'present' : 'missing'
+          refresh_token: tokens.refresh_token ? 'present' : 'missing',
+          expiry_date: tokens.expiry_date ? 'present' : 'missing'
         });
         
         if (!tokens.access_token) {
           console.error('No access token in response:', tokens);
           throw new Error('No access token received from Google');
+        }
+
+        // Calculate expiry date if not provided
+        if (!tokens.expiry_date && tokens.expires_in) {
+          tokens.expiry_date = Date.now() + (tokens.expires_in * 1000);
         }
 
         // Save tokens to session
@@ -1206,7 +1232,8 @@ try {
             hasSession: !!req.session,
             hasTokens: !!req.session?.tokens,
             hasAccessToken: !!req.session?.accessToken,
-            sessionID: req.session?.id
+            sessionID: req.session?.id,
+            expiryDate: req.session?.tokens?.expiry_date
           });
           res.redirect('/');
         });

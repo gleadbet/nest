@@ -264,14 +264,10 @@ try {
   async function fetchDeviceList(accessToken, forceRefresh = false, session = null) {
     const now = Date.now();
     
-    // Reset rate limit window if needed
-    if (now - windowStart > RATE_LIMIT_WINDOW) {
-      requestCount = 0;
-      windowStart = now;
-    }
-
-    // Check rate limit
-    if (requestCount >= MAX_REQUESTS_PER_WINDOW) {
+    // Check rate limit for devices endpoint
+    try {
+      checkRateLimit('devices');
+    } catch (error) {
       console.log('Rate limit reached, using cached data');
       if (deviceListCache) {
         return deviceListCache;
@@ -287,7 +283,6 @@ try {
 
     try {
       console.log('Fetching fresh device list...');
-      requestCount++;
       
       const response = await axios.get(
         `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices`,
@@ -891,6 +886,7 @@ try {
         console.log('ECO mode enabled:', response.data);
       } else {
         // For other modes, first disable ECO mode if it's active
+        // This prevents race conditions where ECO mode conflicts with regular modes
         const currentEcoMode = traits['sdm.devices.traits.ThermostatEco']?.mode;
         if (currentEcoMode === 'MANUAL_ECO') {
           console.log('Disabling ECO mode before changing to:', mode);
@@ -908,8 +904,9 @@ try {
             }
           );
           
-          // Wait a moment for ECO mode to be disabled
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          // Reduced wait time for ECO mode to be disabled (optimized from 1000ms to 500ms)
+          // This reduces the delay while still allowing the command to complete
+          await new Promise(resolve => setTimeout(resolve, 500));
         }
 
         // Then set the requested mode
@@ -930,12 +927,14 @@ try {
         console.log('Mode changed to:', mode, response.data);
       }
 
-      // Wait for a short delay to allow the update to propagate
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Reduced wait time for the update to propagate (optimized from 1000ms to 500ms)
+      // This minimizes the delay while ensuring the Nest API has processed the change
+      await new Promise(resolve => setTimeout(resolve, 500));
 
-      // Fetch updated device list
-      const devicesResponse = await axios.get(
-        `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices`,
+      // OPTIMIZATION: Fetch updated device state for the specific device only
+      // This is faster than fetching all devices and reduces API calls
+      const updatedDeviceResponse = await axios.get(
+        `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
         {
           headers: {
             Authorization: `Bearer ${accessToken}`
@@ -943,107 +942,85 @@ try {
         }
       );
 
-      if (!devicesResponse.data?.devices) {
-        return res.json([]);
+      const updatedDevice = updatedDeviceResponse.data;
+      const updatedTraits = updatedDevice.traits || {};
+      const updatedThermostatModeTrait = updatedTraits['sdm.devices.traits.ThermostatMode'] || {};
+      const updatedEcoTrait = updatedTraits['sdm.devices.traits.ThermostatEco'] || {};
+      const updatedHvacTrait = updatedTraits['sdm.devices.traits.ThermostatHvac'] || {};
+      
+      // Check if device is in ECO mode
+      const isUpdatedEcoMode = updatedEcoTrait.mode === 'MANUAL_ECO';
+      
+      // Get the base mode (HEAT/COOL/OFF) and ECO state
+      const updatedBaseMode = updatedThermostatModeTrait.mode || 'OFF';
+      const updatedMode = isUpdatedEcoMode ? `ECO (${updatedBaseMode})` : updatedBaseMode;
+      const updatedAvailableModes = updatedThermostatModeTrait.availableModes || ['HEAT', 'COOL', 'HEATCOOL', 'OFF'];
+      
+      // Check if device supports ECO mode
+      const updatedHasEcoTrait = !!updatedTraits['sdm.devices.traits.ThermostatEco'];
+      const updatedEcoMode = updatedHasEcoTrait ? 'ECO' : null;
+      
+      // Add ECO to available modes if supported
+      const updatedAllAvailableModes = updatedEcoMode ? [...updatedAvailableModes, updatedEcoMode] : updatedAvailableModes;
+
+      // Determine device status
+      let updatedStatus = 'UNKNOWN';
+      if (updatedHvacTrait.status) {
+        updatedStatus = updatedHvacTrait.status;
+      } else if (isUpdatedEcoMode) {
+        updatedStatus = 'IDLE';  // Default to IDLE when in ECO mode
       }
 
-      const thermostats = devicesResponse.data.devices
-        .filter(device => device.type === 'sdm.devices.types.THERMOSTAT')
-        .map(device => {
-          const deviceId = device.name.split('/').pop();
-          const traits = device.traits || {};
-          const thermostatModeTrait = traits['sdm.devices.traits.ThermostatMode'] || {};
-          const ecoTrait = traits['sdm.devices.traits.ThermostatEco'] || {};
-          const hvacTrait = traits['sdm.devices.traits.ThermostatHvac'] || {};
-          
-          // Check if device is in ECO mode
-          const isEcoMode = ecoTrait.mode === 'MANUAL_ECO';
-          
-          // Get the base mode (HEAT/COOL/OFF) and ECO state
-          const baseMode = thermostatModeTrait.mode || 'OFF';
-          const mode = isEcoMode ? `ECO (${baseMode})` : baseMode;
-          const availableModes = thermostatModeTrait.availableModes || ['HEAT', 'COOL', 'HEATCOOL', 'OFF'];
-          
-          // Check if device supports ECO mode
-          const hasEcoTrait = !!traits['sdm.devices.traits.ThermostatEco'];
-          const ecoMode = hasEcoTrait ? 'ECO' : null;
-          
-          // Add ECO to available modes if supported
-          const allAvailableModes = ecoMode ? [...availableModes, ecoMode] : availableModes;
+      // Get target temperature based on mode
+      let updatedTargetTemp = 'N/A';
+      if (isUpdatedEcoMode) {
+        const heatTemp = typeof updatedEcoTrait.heatCelsius === 'number' ? Number(updatedEcoTrait.heatCelsius.toFixed(1)) : 'N/A';
+        const coolTemp = typeof updatedEcoTrait.coolCelsius === 'number' ? Number(updatedEcoTrait.coolCelsius.toFixed(1)) : 'N/A';
+        updatedTargetTemp = `ECO (${heatTemp}°C - ${coolTemp}°C)`;
+      } else if (updatedBaseMode === 'COOL') {
+        const temp = updatedTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius;
+        updatedTargetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
+      } else if (updatedBaseMode === 'HEAT') {
+        const temp = updatedTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius;
+        updatedTargetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
+      }
 
-          // Determine device status
-          let status = 'UNKNOWN';
-          if (hvacTrait.status) {
-            status = hvacTrait.status;
-          } else if (isEcoMode) {
-            status = 'IDLE';  // Default to IDLE when in ECO mode
-          }
-          
-          console.log('Processing device modes:', {
-            deviceId,
-            mode,
-            baseMode,
-            isEcoMode,
-            ecoTraitMode: ecoTrait.mode,
-            thermostatMode: thermostatModeTrait.mode,
-            hvacStatus: hvacTrait.status,
-            status,
-            availableModes,
-            hasEcoTrait,
-            ecoMode,
-            allAvailableModes,
-            thermostatModeTrait,
-            ecoTrait,
-            allTraits: Object.keys(traits)
-          });
+      // Get the device name, handling both custom names and default names
+      let updatedDeviceName = req.session.customNames?.[deviceId];
+      if (!updatedDeviceName) {
+        // Try to get name from Info trait first
+        updatedDeviceName = updatedTraits['sdm.devices.traits.Info']?.customName;
+        // If no custom name in Info trait, use the last part of the device name
+        if (!updatedDeviceName) {
+          updatedDeviceName = updatedDevice.name.split('/').pop();
+        }
+      }
 
-          // Get target temperature based on mode
-          let targetTemp = 'N/A';
-          if (isEcoMode) {
-            const heatTemp = typeof ecoTrait.heatCelsius === 'number' ? Number(ecoTrait.heatCelsius.toFixed(1)) : 'N/A';
-            const coolTemp = typeof ecoTrait.coolCelsius === 'number' ? Number(ecoTrait.coolCelsius.toFixed(1)) : 'N/A';
-            targetTemp = `ECO (${heatTemp}°C - ${coolTemp}°C)`;
-          } else if (baseMode === 'COOL') {
-            const temp = traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius;
-            targetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
-          } else if (baseMode === 'HEAT') {
-            const temp = traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius;
-            targetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
-          }
+      const processedUpdatedDevice = {
+        id: deviceId,
+        name: updatedDeviceName,
+        currentTemp: typeof updatedTraits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius === 'number' 
+          ? Number(updatedTraits['sdm.devices.traits.Temperature'].ambientTemperatureCelsius.toFixed(1))
+          : 'N/A',
+        targetTemp: updatedTargetTemp,
+        mode: updatedMode,
+        status: updatedStatus,
+        humidity: typeof updatedTraits['sdm.devices.traits.Humidity']?.ambientHumidityPercent === 'number'
+          ? Number(updatedTraits['sdm.devices.traits.Humidity'].ambientHumidityPercent.toFixed(1))
+          : 'N/A',
+        availableModes: updatedAllAvailableModes,
+        hasEcoTrait: updatedHasEcoTrait
+      };
 
-          // Get the device name, handling both custom names and default names
-          let deviceName = req.session.customNames?.[deviceId];
-          if (!deviceName) {
-            // Try to get name from Info trait first
-            deviceName = traits['sdm.devices.traits.Info']?.customName;
-            // If no custom name in Info trait, use the last part of the device name
-            if (!deviceName) {
-              deviceName = device.name.split('/').pop();
-            }
-          }
+      console.log('Processed updated device:', processedUpdatedDevice);
 
-          const processedDevice = {
-            id: deviceId,
-            name: deviceName,
-            currentTemp: typeof traits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius === 'number' 
-              ? Number(traits['sdm.devices.traits.Temperature'].ambientTemperatureCelsius.toFixed(1))
-              : 'N/A',
-            targetTemp: targetTemp,
-            mode: mode,
-            status: status,
-            humidity: typeof traits['sdm.devices.traits.Humidity']?.ambientHumidityPercent === 'number'
-              ? Number(traits['sdm.devices.traits.Humidity'].ambientHumidityPercent.toFixed(1))
-              : 'N/A',
-            availableModes: allAvailableModes,
-            hasEcoTrait: hasEcoTrait
-          };
-
-          console.log('Processed device:', processedDevice);
-          return processedDevice;
-        });
+      // CACHE INVALIDATION: Clear device list cache to ensure fresh data on next fetch
+      // This prevents stale data from being returned after mode changes
+      deviceListCache = null;
+      lastDeviceListFetch = 0;
 
       res.setHeader('Content-Type', 'application/json');
-      res.json(thermostats);
+      res.json([processedUpdatedDevice]);
     } catch (error) {
       console.error('Error updating mode:', {
         message: error.message,

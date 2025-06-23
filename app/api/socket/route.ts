@@ -53,4 +53,10 @@ export async function GET(request: Request) {
 
 export async function POST() {
   return NextResponse.json({ success: true });
+}
+
+interface DeviceTableProps {
+  deviceId: string;
+  refreshInterval?: number;
+  setpointIncrement?: number;
 } 

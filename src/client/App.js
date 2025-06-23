@@ -295,7 +295,11 @@ function App() {
 
   // Get the current run status based on mode and temperatures
   const getRunStatus = (device) => {
-    if (device.mode === 'OFF' || device.mode === 'ECO') {
+    // Check if device is in ECO mode (either "ECO" or "ECO (HEAT/COOL)")
+    // This handles the backend's ECO mode format which includes the base mode
+    const isEcoMode = device.mode && device.mode.startsWith('ECO');
+    
+    if (device.mode === 'OFF' || isEcoMode) {
       return 'Off';
     }
     
@@ -332,7 +336,17 @@ function App() {
       }
 
       const updatedDevices = await response.json();
-      setDevices(updatedDevices);
+      
+      // OPTIMIZATION: Update local state with only the updated device
+      // The backend now returns only the changed device instead of all devices
+      // This provides immediate UI feedback and reduces data transfer
+      setDevices(prevDevices => 
+        prevDevices.map(prevDevice => 
+          prevDevice.id === device.id 
+            ? updatedDevices[0] // The response now contains only the updated device
+            : prevDevice
+        )
+      );
     } catch (error) {
       console.error('Error updating mode:', error);
       alert(`Failed to update mode: ${error.message}`);
@@ -537,12 +551,14 @@ function App() {
                     <div className="flex items-center justify-center space-x-2">
                       <button
                         onClick={() => handleTempChange(device, device.targetTemp - tempIncrement)}
-                        disabled={updatingTemp === device.id || device.mode === 'ECO'}
+                        // ECO MODE DISABLING: Disable temperature controls when in ECO mode
+                        // ECO mode uses preset temperature ranges and doesn't allow manual adjustment
+                        disabled={updatingTemp === device.id || (device.mode && device.mode.startsWith('ECO'))}
                         className={`
                           px-3 py-1 rounded-lg font-semibold
                           ${updatingTemp === device.id 
                             ? 'bg-gray-300 cursor-not-allowed'
-                            : device.mode === 'ECO'
+                            : (device.mode && device.mode.startsWith('ECO'))
                               ? 'bg-gray-300 cursor-not-allowed'
                               : 'bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white'
                           }
@@ -567,12 +583,14 @@ function App() {
                       </span>
                       <button
                         onClick={() => handleTempChange(device, device.targetTemp + tempIncrement)}
-                        disabled={updatingTemp === device.id || device.mode === 'ECO'}
+                        // ECO MODE DISABLING: Disable temperature controls when in ECO mode
+                        // ECO mode uses preset temperature ranges and doesn't allow manual adjustment
+                        disabled={updatingTemp === device.id || (device.mode && device.mode.startsWith('ECO'))}
                         className={`
                           px-3 py-1 rounded-lg font-semibold
                           ${updatingTemp === device.id 
                             ? 'bg-gray-300 cursor-not-allowed'
-                            : device.mode === 'ECO'
+                            : (device.mode && device.mode.startsWith('ECO'))
                               ? 'bg-gray-300 cursor-not-allowed'
                               : 'bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white'
                           }
@@ -596,7 +614,9 @@ function App() {
                   </td>
                   <td className="px-4 py-2 border">
                     <select
-                      value={device.mode || ''}
+                      // ECO MODE HANDLING: Check if device mode starts with "ECO" for dropdown selection
+                      // This handles both "ECO" and "ECO (HEAT/COOL)" formats from the backend
+                      value={device.mode && device.mode.startsWith('ECO') ? 'ECO' : (device.mode || '')}
                       onChange={(e) => handleModeChange(device, e.target.value)}
                       className="w-full p-1 border rounded"
                     >

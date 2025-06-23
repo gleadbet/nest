@@ -8,22 +8,32 @@ import { useSession } from 'next-auth/react';
  * @property {number} temperature - Temperature in Celsius
  * @property {number} [humidity] - Optional humidity percentage
  * @property {string} lastUpdate - Timestamp of last data update
+ * @property {string} [mode] - Optional mode for run status
+ * @property {string} [hvacStatus] - Optional HVAC state (HEATING, COOLING, OFF)
+ * @property {number} [heatSetpoint] - Optional heat setpoint in Celsius
+ * @property {number} [coolSetpoint] - Optional cool setpoint in Celsius
  */
 interface DeviceData {
   name: string;
   temperature: number;
   humidity?: number;
   lastUpdate: string;
+  mode?: string;
+  hvacStatus?: string;
+  heatSetpoint?: number;
+  coolSetpoint?: number;
 }
 
 /**
  * DeviceTableProps interface defines the component's props
  * @property {string} deviceId - Unique identifier for the device
  * @property {number} [refreshInterval] - Optional polling interval in milliseconds (default: 60000)
+ * @property {number} [setpointIncrement] - Optional setpoint increment in Celsius
  */
 interface DeviceTableProps {
   deviceId: string;
   refreshInterval?: number;
+  setpointIncrement?: number;
 }
 
 /**
@@ -41,7 +51,7 @@ interface DeviceTableProps {
  * - Automatically handles token refresh through useSession hook
  * - Reconnects WebSocket when token is refreshed
  */
-export default function DeviceTable({ deviceId, refreshInterval = 60000 }: DeviceTableProps) {
+export default function DeviceTable({ deviceId, refreshInterval = 60000, setpointIncrement = 0.5 }: DeviceTableProps) {
   // useSession hook automatically handles:
   // - Initial session loading
   // - Token refresh when expired
@@ -61,6 +71,9 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000 }: Devic
   const retryCountRef = useRef(0);
   const lastFetchTimeRef = useRef(0);
   const customNameRef = useRef(customName);
+
+  // Add loading state for setpoint adjustments
+  const [adjustingSetpoint, setAdjustingSetpoint] = useState<'heat' | 'cool' | null>(null);
 
   // Update customNameRef when customName changes
   useEffect(() => {
@@ -114,7 +127,11 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000 }: Devic
             name: customNameRef.current || data.traits['sdm.devices.traits.Info']?.modelName || 'Device ' + deviceId,
             temperature: data.traits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius ?? 0,
             humidity: data.traits['sdm.devices.traits.Humidity']?.ambientHumidityPercent,
-            lastUpdate: new Date().toLocaleTimeString()
+            lastUpdate: new Date().toLocaleTimeString(),
+            mode: data.traits['sdm.devices.traits.ThermostatMode']?.mode,
+            hvacStatus: data.traits['sdm.devices.traits.ThermostatHvac']?.status,
+            heatSetpoint: data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius,
+            coolSetpoint: data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius
           };
           setDeviceData(deviceInfo);
         }
@@ -159,7 +176,11 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000 }: Devic
             name: customNameRef.current || data.traits['sdm.devices.traits.Info']?.modelName || 'Device ' + deviceId,
             temperature: data.traits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius ?? 0,
             humidity: data.traits['sdm.devices.traits.Humidity']?.ambientHumidityPercent,
-            lastUpdate: new Date().toLocaleTimeString()
+            lastUpdate: new Date().toLocaleTimeString(),
+            mode: data.traits['sdm.devices.traits.ThermostatMode']?.mode,
+            hvacStatus: data.traits['sdm.devices.traits.ThermostatHvac']?.status,
+            heatSetpoint: data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius,
+            coolSetpoint: data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius
           };
           setDeviceData(deviceInfo);
           retryCountRef.current = 0;
@@ -264,6 +285,69 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000 }: Devic
     if (tempF < 90) return '#f59e0b';    // Orange for warm
     return '#ef4444';                    // Red for hot
   };
+
+  // Update setpoint adjustment function
+  const adjustSetpoint = async (type: 'heat' | 'cool', value: number) => {
+    if (pendingSetpoint) return; // Prevent multiple changes while pending
+    
+    try {
+      setAdjustingSetpoint(type);
+      setSetpointStatus(`${type === 'heat' ? 'Heat' : 'Cool'} setpoint updating...`);
+      setPendingSetpoint({ type, value, timestamp: Date.now() });
+      
+      const response = await fetch(`/api/devices/${deviceId}/setTemperature`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session?.accessToken}`
+        },
+        body: JSON.stringify({
+          type,
+          temperature: value
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update setpoint');
+      }
+      
+      // Don't clear pending state here - wait for the actual update
+    } catch (error) {
+      console.error('Error updating setpoint:', error);
+      setSetpointStatus(`Failed to update ${type} setpoint`);
+      setPendingSetpoint(null);
+      setTimeout(() => setSetpointStatus(''), 3000);
+    } finally {
+      setAdjustingSetpoint(null);
+    }
+  };
+
+  const [pendingSetpoint, setPendingSetpoint] = useState<{
+    type: 'heat' | 'cool';
+    value: number;
+    timestamp: number;
+  } | null>(null);
+  const [setpointStatus, setSetpointStatus] = useState<string>('');
+
+  useEffect(() => {
+    if (!deviceData || !pendingSetpoint) return;
+
+    const currentValue = pendingSetpoint.type === 'heat' 
+      ? deviceData.heatSetpoint 
+      : deviceData.coolSetpoint;
+
+    if (currentValue === pendingSetpoint.value) {
+      // Setpoint has been updated
+      setSetpointStatus(`${pendingSetpoint.type === 'heat' ? 'Heat' : 'Cool'} setpoint updated`);
+      setPendingSetpoint(null);
+      setTimeout(() => setSetpointStatus(''), 2000);
+    } else if (Date.now() - pendingSetpoint.timestamp > 30000) {
+      // Timeout after 30 seconds
+      setSetpointStatus(`Setpoint update timed out`);
+      setPendingSetpoint(null);
+      setTimeout(() => setSetpointStatus(''), 3000);
+    }
+  }, [deviceData, pendingSetpoint]);
 
   if (isLoading && !deviceData) {
     return (
@@ -377,13 +461,17 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000 }: Devic
             </linearGradient>
           </defs>
           
-          {/* Light background circle */}
+          {/* Light background circle with HVAC status color */}
           <circle
             cx="100"
             cy="100"
             r="90"
-            fill="#f8fafc"
-            stroke="#93c5fd"
+            fill={deviceData.hvacStatus === 'HEATING' ? '#fee2e2' : 
+                  deviceData.hvacStatus === 'COOLING' ? '#dbeafe' : 
+                  '#f8fafc'}
+            stroke={deviceData.hvacStatus === 'HEATING' ? '#fecaca' :
+                    deviceData.hvacStatus === 'COOLING' ? '#bfdbfe' :
+                    '#93c5fd'}
             strokeWidth="1"
           />
           
@@ -403,6 +491,41 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000 }: Devic
             stroke="#e5e7eb"
             strokeWidth="12"
           />
+          
+          {/* HVAC Status Indicator */}
+          {deviceData.hvacStatus && (
+            <g>
+              {/* Status background */}
+              <rect
+                x="60"
+                y="140"
+                width="80"
+                height="24"
+                rx="12"
+                fill={deviceData.hvacStatus === 'HEATING' ? '#fee2e2' :
+                      deviceData.hvacStatus === 'COOLING' ? '#dbeafe' :
+                      '#f3f4f6'}
+                stroke={deviceData.hvacStatus === 'HEATING' ? '#fecaca' :
+                        deviceData.hvacStatus === 'COOLING' ? '#bfdbfe' :
+                        '#e5e7eb'}
+                strokeWidth="1"
+              />
+              {/* Status text */}
+              <text
+                x="100"
+                y="156"
+                textAnchor="middle"
+                dominantBaseline="middle"
+                className={`text-sm font-medium ${
+                  deviceData.hvacStatus === 'HEATING' ? 'fill-red-800' :
+                  deviceData.hvacStatus === 'COOLING' ? 'fill-blue-800' :
+                  'fill-gray-600'
+                }`}
+              >
+                {deviceData.hvacStatus === 'OFF' ? 'IDLE' : deviceData.hvacStatus}
+              </text>
+            </g>
+          )}
           
           {/* Major tick marks (10-degree increments) */}
           {[...Array(5)].map((_, i) => {
@@ -530,6 +653,116 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000 }: Devic
             <tr>
               <td className="py-1 text-gray-600">Humidity:</td>
               <td className="py-1 font-medium">{deviceData.humidity.toFixed(1)}%</td>
+            </tr>
+          )}
+          {deviceData.mode && (
+            <tr>
+              <td className="py-1 text-gray-600">Mode:</td>
+              <td className="py-1 font-medium">
+                <span className={`px-2 py-1 rounded text-sm ${
+                  deviceData.mode === 'HEAT' ? 'bg-red-100 text-red-800' :
+                  deviceData.mode === 'COOL' ? 'bg-blue-100 text-blue-800' :
+                  'bg-gray-100 text-gray-800'
+                }`}>
+                  {deviceData.mode}
+                </span>
+              </td>
+            </tr>
+          )}
+          {deviceData.hvacStatus && (
+            <tr>
+              <td className="py-1 text-gray-600">Status:</td>
+              <td className="py-1 font-medium">
+                <span className={`px-2 py-1 rounded text-sm ${
+                  deviceData.hvacStatus === 'HEATING' ? 'bg-red-100 text-red-800' :
+                  deviceData.hvacStatus === 'COOLING' ? 'bg-blue-100 text-blue-800' :
+                  'bg-gray-100 text-gray-800'
+                }`}>
+                  {deviceData.hvacStatus === 'OFF' ? 'IDLE' : deviceData.hvacStatus}
+                </span>
+              </td>
+            </tr>
+          )}
+          {/* Heat Setpoint Control */}
+          {deviceData.heatSetpoint !== undefined && (
+            <tr>
+              <td className="py-1 text-gray-600">Heat Setpoint:</td>
+              <td className="py-1 font-medium">
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => adjustSetpoint('heat', deviceData.heatSetpoint! - (setpointIncrement || 0.5))}
+                      disabled={pendingSetpoint !== null}
+                      className={`px-2 py-1 rounded transition-colors ${
+                        pendingSetpoint?.type === 'heat'
+                          ? 'bg-red-200 text-red-900 cursor-not-allowed'
+                          : pendingSetpoint
+                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            : 'bg-red-100 text-red-800 hover:bg-red-200'
+                      }`}
+                    >
+                      {pendingSetpoint?.type === 'heat' ? '...' : '-'}
+                    </button>
+                    <span className="w-16 text-center">
+                      {deviceData.heatSetpoint.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.heatSetpoint).toFixed(1)}°F
+                    </span>
+                    <button
+                      onClick={() => adjustSetpoint('heat', deviceData.heatSetpoint! + (setpointIncrement || 0.5))}
+                      disabled={pendingSetpoint !== null}
+                      className={`px-2 py-1 rounded transition-colors ${
+                        pendingSetpoint?.type === 'heat'
+                          ? 'bg-red-200 text-red-900 cursor-not-allowed'
+                          : pendingSetpoint
+                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            : 'bg-red-100 text-red-800 hover:bg-red-200'
+                      }`}
+                    >
+                      {pendingSetpoint?.type === 'heat' ? '...' : '+'}
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-gray-600">
+                    <span>Increment: {(setpointIncrement || 0.5).toFixed(1)}°</span>
+                    {setpointStatus && (pendingSetpoint?.type === 'heat' || adjustingSetpoint === 'heat') && (
+                      <span className="italic">{setpointStatus}</span>
+                    )}
+                  </div>
+                </div>
+              </td>
+            </tr>
+          )}
+          {/* Cool Setpoint Control */}
+          {deviceData.coolSetpoint !== undefined && (
+            <tr>
+              <td className="py-1 text-gray-600">Cool Setpoint:</td>
+              <td className="py-1 font-medium">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => adjustSetpoint('cool', deviceData.coolSetpoint! - 0.5)}
+                    disabled={adjustingSetpoint === 'cool'}
+                    className={`px-2 py-1 rounded transition-colors ${
+                      adjustingSetpoint === 'cool'
+                        ? 'bg-blue-200 text-blue-900 cursor-not-allowed'
+                        : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
+                    }`}
+                  >
+                    {adjustingSetpoint === 'cool' ? '...' : '-'}
+                  </button>
+                  <span className="w-16 text-center">
+                    {deviceData.coolSetpoint.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.coolSetpoint).toFixed(1)}°F
+                  </span>
+                  <button
+                    onClick={() => adjustSetpoint('cool', deviceData.coolSetpoint! + 0.5)}
+                    disabled={adjustingSetpoint === 'cool'}
+                    className={`px-2 py-1 rounded transition-colors ${
+                      adjustingSetpoint === 'cool'
+                        ? 'bg-blue-200 text-blue-900 cursor-not-allowed'
+                        : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
+                    }`}
+                  >
+                    {adjustingSetpoint === 'cool' ? '...' : '+'}
+                  </button>
+                </div>
+              </td>
             </tr>
           )}
           <tr>

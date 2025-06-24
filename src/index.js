@@ -240,6 +240,10 @@ try {
     devices: { count: 0, windowStart: Date.now() }
   };
 
+  // Add debouncing for temperature changes to prevent race conditions
+  const temperatureChangeDebounce = new Map(); // deviceId -> timeout
+  const DEBOUNCE_DELAY = 1000; // 1 second debounce
+
   // Add rate limit check function
   function checkRateLimit(endpoint) {
     const now = Date.now();
@@ -258,6 +262,19 @@ try {
     }
     
     counter.count++;
+    return true;
+  }
+
+  // Add debounce check function for temperature changes
+  function checkTemperatureDebounce(deviceId) {
+    if (temperatureChangeDebounce.has(deviceId)) {
+      const timeSinceLastChange = Date.now() - temperatureChangeDebounce.get(deviceId);
+      if (timeSinceLastChange < DEBOUNCE_DELAY) {
+        const timeToWait = DEBOUNCE_DELAY - timeSinceLastChange;
+        throw new Error(`Please wait ${Math.ceil(timeToWait / 1000)} seconds before making another temperature change.`);
+      }
+    }
+    temperatureChangeDebounce.set(deviceId, Date.now());
     return true;
   }
 
@@ -485,8 +502,9 @@ try {
 
           console.log('Processed device:', processedDevice);
 
+          // TODO: Re-enable when database integration is added
           // Store the processed device data
-          storeThermostatData(processedDevice);
+          // storeThermostatData(processedDevice);
 
           return processedDevice;
         });
@@ -620,6 +638,9 @@ try {
       // Check rate limit before proceeding
       checkRateLimit('temperature');
 
+      // RACE CONDITION FIX: Check debounce to prevent rapid successive changes
+      checkTemperatureDebounce(req.params.deviceId);
+
       const { deviceId } = req.params;
       const { temperature } = req.body;
 
@@ -647,7 +668,7 @@ try {
         useFahrenheit: req.body.useFahrenheit
       });
 
-      // First get the current device state to determine the mode
+      // OPTIMIZATION: Get current device state to check ECO mode and prevent conflicts
       const deviceResponse = await axios.get(
         `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
         {
@@ -664,7 +685,7 @@ try {
       const baseMode = thermostatModeTrait.mode || 'HEAT';
       const isEcoMode = ecoTrait.mode === 'MANUAL_ECO';
 
-      // If in ECO mode, we need to disable it first
+      // RACE CONDITION FIX: If in ECO mode, disable it first with minimal delay
       if (isEcoMode) {
         console.log('Device is in ECO mode, disabling before setting temperature');
         await axios.post(
@@ -681,8 +702,9 @@ try {
           }
         );
         
-        // Wait for ECO mode to be disabled
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // OPTIMIZATION: Reduced wait time from 1000ms to 500ms
+        // This minimizes the delay while still allowing the command to complete
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
 
       // Determine which command to use based on mode
@@ -716,10 +738,17 @@ try {
 
       console.log('Temperature update response:', response.data);
 
-      // Wait for the change to be processed
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // OPTIMIZATION: Reduced wait time from 2000ms to 500ms
+      // This provides faster response while ensuring the Nest API has processed the change
+      await new Promise(resolve => setTimeout(resolve, 500));
 
-      // Return the current device state instead of fetching all devices
+      // CACHE INVALIDATION: Clear device list cache to prevent stale data
+      // This ensures the next device fetch returns fresh data
+      deviceListCache = null;
+      lastDeviceListFetch = 0;
+
+      // OPTIMIZATION: Fetch updated device state for the specific device only
+      // This is faster than fetching all devices and reduces API calls
       const updatedDeviceResponse = await axios.get(
         `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
         {

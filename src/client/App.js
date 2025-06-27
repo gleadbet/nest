@@ -16,15 +16,33 @@ function App() {
   const [editingName, setEditingName] = useState(null);
   const [newName, setNewName] = useState('');
   const [updatingTemp, setUpdatingTemp] = useState(null);
+  const [selectedDevice, setSelectedDevice] = useState(null);
   const BASE_INTERVAL = 60000;
 
   // Check authentication status
   const checkAuth = async () => {
     try {
       console.log('Checking authentication status...');
+      console.log('Making request to /api/auth/status at:', new Date().toISOString());
+      
+      const startTime = Date.now();
+      
+      // Add timeout to fetch request
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      
       const response = await fetch('/api/auth/status', {
-        credentials: 'include'
+        credentials: 'include',
+        signal: controller.signal
       });
+      
+      clearTimeout(timeoutId);
+      
+      const endTime = Date.now();
+      console.log('Auth response received after:', endTime - startTime, 'ms');
+      console.log('Auth response status:', response.status);
+      console.log('Auth response headers:', Object.fromEntries(response.headers.entries()));
+      
       const data = await response.json();
       console.log('Auth status response:', data);
       
@@ -38,7 +56,18 @@ function App() {
       return true;
     } catch (error) {
       console.error('Error checking auth status:', error);
-      window.location.href = '/auth/login';
+      console.error('Auth error details:', {
+        message: error.message,
+        name: error.name,
+        stack: error.stack
+      });
+      
+      if (error.name === 'AbortError') {
+        console.error('Auth request timed out');
+        setError('Request timed out. Please check your connection and try again.');
+      } else {
+        window.location.href = '/auth/login';
+      }
       return false;
     }
   };
@@ -50,11 +79,26 @@ function App() {
       if (!isAuth) return;
 
       console.log('Fetching devices...');
+      console.log('Making request to /api/devices at:', new Date().toISOString());
+      
+      const startTime = Date.now();
+      
+      // Add timeout to fetch request
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+      
       const response = await fetch('/api/devices', {
-        credentials: 'include'
+        credentials: 'include',
+        signal: controller.signal
       });
       
+      clearTimeout(timeoutId);
+      
+      const endTime = Date.now();
+      console.log('Response received after:', endTime - startTime, 'ms');
       console.log('Response status:', response.status);
+      console.log('Response headers:', Object.fromEntries(response.headers.entries()));
+      
       const data = await response.json();
       console.log('Raw response data:', data);
       
@@ -111,8 +155,20 @@ function App() {
       setLastUpdate(new Date());
     } catch (error) {
       console.error('Error fetching devices:', error);
-      setError(error.message);
-      setLoading(false);
+      console.error('Error details:', {
+        message: error.message,
+        name: error.name,
+        stack: error.stack
+      });
+      
+      if (error.name === 'AbortError') {
+        console.error('Devices request timed out');
+        setError('Request timed out. Please check your connection and try again.');
+        setLoading(false);
+      } else {
+        setError(error.message);
+        setLoading(false);
+      }
     }
   };
 
@@ -203,44 +259,51 @@ function App() {
 
   const handleTempChange = async (device, newTemp) => {
     try {
-      setUpdatingTemp(device.id);
-      console.log('Updating temperature:', {
-        deviceId: device.id,
-        newTemp,
-        useFahrenheit
-      });
+      // ECO MODE CHECK: Prevent temperature changes when in ECO mode
+      // ECO mode uses preset temperature ranges and doesn't allow manual adjustment
+      if (device.mode && device.mode.startsWith('ECO')) {
+        alert('Cannot adjust temperature while in ECO mode. Please change to HEAT or COOL mode first.');
+        return;
+      }
 
+      // VALIDATION: Check if targetTemp is a valid number
+      if (typeof device.targetTemp !== 'number' || isNaN(device.targetTemp)) {
+        console.error('Invalid target temperature:', device.targetTemp);
+        alert('Cannot adjust temperature: Invalid target temperature value');
+        return;
+      }
+
+      setUpdatingTemp(device.id);
+      
       const response = await fetch(`/api/devices/${device.id}/temperature`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include',
-        body: JSON.stringify({ 
-          temperature: newTemp,
-          useFahrenheit 
-        })
+        body: JSON.stringify({ temperature: newTemp }),
+        credentials: 'include'
       });
 
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.details || data.error || 'Failed to update temperature');
+        const errorData = await response.json();
+        throw new Error(errorData.details || errorData.error || 'Failed to update temperature');
       }
 
-      // Update local state immediately for better UX
+      const updatedDevices = await response.json();
+      
+      // OPTIMIZATION: Update local state with only the updated device
+      // The backend now returns only the changed device instead of all devices
+      // This provides immediate UI feedback and reduces data transfer
       setDevices(prevDevices => 
-        prevDevices.map(d => 
-          d.id === device.id 
-            ? { ...d, targetTemp: newTemp }
-            : d
+        prevDevices.map(prevDevice => 
+          prevDevice.id === device.id 
+            ? updatedDevices[0] // The response now contains only the updated device
+            : prevDevice
         )
       );
-
-      // Fetch fresh data in the background
-      fetchDevices();
     } catch (error) {
       console.error('Error updating temperature:', error);
-      setError(error.message);
+      alert(`Failed to update temperature: ${error.message}`);
     } finally {
       setUpdatingTemp(null);
     }
@@ -550,15 +613,27 @@ function App() {
                   <td className="px-4 py-2 border">
                     <div className="flex items-center justify-center space-x-2">
                       <button
-                        onClick={() => handleTempChange(device, device.targetTemp - tempIncrement)}
+                        onClick={() => {
+                          // ECO MODE CHECK: Prevent temperature changes when in ECO mode
+                          if (device.mode && device.mode.startsWith('ECO')) {
+                            alert('Cannot adjust temperature while in ECO mode. Please change to HEAT or COOL mode first.');
+                            return;
+                          }
+                          // VALIDATION: Check if targetTemp is a valid number
+                          if (typeof device.targetTemp !== 'number' || isNaN(device.targetTemp)) {
+                            alert('Cannot adjust temperature: Invalid target temperature value');
+                            return;
+                          }
+                          handleTempChange(device, device.targetTemp - tempIncrement);
+                        }}
                         // ECO MODE DISABLING: Disable temperature controls when in ECO mode
                         // ECO mode uses preset temperature ranges and doesn't allow manual adjustment
-                        disabled={updatingTemp === device.id || (device.mode && device.mode.startsWith('ECO'))}
+                        disabled={updatingTemp === device.id || (device.mode && device.mode.startsWith('ECO')) || (typeof device.targetTemp !== 'number')}
                         className={`
                           px-3 py-1 rounded-lg font-semibold
                           ${updatingTemp === device.id 
                             ? 'bg-gray-300 cursor-not-allowed'
-                            : (device.mode && device.mode.startsWith('ECO'))
+                            : (device.mode && device.mode.startsWith('ECO')) || (typeof device.targetTemp !== 'number')
                               ? 'bg-gray-300 cursor-not-allowed'
                               : 'bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white'
                           }
@@ -582,15 +657,27 @@ function App() {
                         {formatTemp(device.targetTemp, useFahrenheit)}°{useFahrenheit ? 'F' : 'C'}
                       </span>
                       <button
-                        onClick={() => handleTempChange(device, device.targetTemp + tempIncrement)}
+                        onClick={() => {
+                          // ECO MODE CHECK: Prevent temperature changes when in ECO mode
+                          if (device.mode && device.mode.startsWith('ECO')) {
+                            alert('Cannot adjust temperature while in ECO mode. Please change to HEAT or COOL mode first.');
+                            return;
+                          }
+                          // VALIDATION: Check if targetTemp is a valid number
+                          if (typeof device.targetTemp !== 'number' || isNaN(device.targetTemp)) {
+                            alert('Cannot adjust temperature: Invalid target temperature value');
+                            return;
+                          }
+                          handleTempChange(device, device.targetTemp + tempIncrement);
+                        }}
                         // ECO MODE DISABLING: Disable temperature controls when in ECO mode
                         // ECO mode uses preset temperature ranges and doesn't allow manual adjustment
-                        disabled={updatingTemp === device.id || (device.mode && device.mode.startsWith('ECO'))}
+                        disabled={updatingTemp === device.id || (device.mode && device.mode.startsWith('ECO')) || (typeof device.targetTemp !== 'number')}
                         className={`
                           px-3 py-1 rounded-lg font-semibold
                           ${updatingTemp === device.id 
                             ? 'bg-gray-300 cursor-not-allowed'
-                            : (device.mode && device.mode.startsWith('ECO'))
+                            : (device.mode && device.mode.startsWith('ECO')) || (typeof device.targetTemp !== 'number')
                               ? 'bg-gray-300 cursor-not-allowed'
                               : 'bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white'
                           }

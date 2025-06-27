@@ -14,12 +14,21 @@
 
     // Add loading state check
     console.log('Initializing application...');
+    console.log('Page load time:', new Date().toISOString());
+    
     window.addEventListener('load', function() {
-      console.log('Page fully loaded');
+      console.log('Page fully loaded at:', new Date().toISOString());
       if (!window.React) {
         console.error('React not loaded!');
         document.getElementById('root').innerHTML = '<div class="p-4"><h1 class="text-2xl font-bold text-red-500">Error Loading Application</h1><p>React failed to load. Please check the console for errors.</p></div>';
+      } else {
+        console.log('React loaded successfully');
       }
+    });
+    
+    // Add script loading error handling
+    window.addEventListener('error', function(e) {
+      console.error('Script loading error:', e);
     });
   </script>
 </head>
@@ -32,6 +41,21 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   
   <!-- Then load our bundle -->
-  <script src="/static/bundle.js"></script>
+  <script>
+    // Add cache-busting parameter to force reload of bundle
+    console.log('Loading bundle with cache-busting...');
+    const script = document.createElement('script');
+    script.src = '/static/bundle.js?v=' + Date.now();
+    
+    script.onload = function() {
+      console.log('Bundle loaded successfully at:', new Date().toISOString());
+    };
+    
+    script.onerror = function() {
+      console.error('Failed to load bundle at:', new Date().toISOString());
+    };
+    
+    document.body.appendChild(script);
+  </script>
 </body>
 </html> 

@@ -336,6 +336,16 @@ try {
     } catch (error) {
       console.error('Error fetching device list:', error);
       
+      // Handle DNS resolution errors
+      if (error.code === 'ENOTFOUND' || error.code === 'ENETUNREACH') {
+        console.error('Network connectivity issue:', error.code, error.message);
+        if (deviceListCache) {
+          console.log('Returning cached data due to network issue');
+          return deviceListCache;
+        }
+        throw new Error(`Network connectivity issue: ${error.message}. Please check your internet connection.`);
+      }
+      
       // Handle token expiration
       if (error.response?.status === 401 && session) {
         console.log('Token expired, attempting to refresh...');
@@ -359,9 +369,9 @@ try {
         }
       }
       
-      // If we have cached data and the error is rate limiting, return cached data
-      if ((error.response?.status === 429 || error.response?.status === 403) && deviceListCache) {
-        console.log('Rate limited, returning cached data');
+      // If we have cached data and the error is rate limiting or network related, return cached data
+      if ((error.response?.status === 429 || error.response?.status === 403 || error.code === 'ETIMEDOUT') && deviceListCache) {
+        console.log('Rate limited or timeout, returning cached data');
         return deviceListCache;
       }
       
@@ -535,6 +545,29 @@ try {
       console.log(`API /api/devices request completed in ${totalRequestTime}ms`);
     } catch (error) {
       console.error('Error in /api/devices:', error);
+      
+      // Handle network connectivity issues
+      if (error.code === 'ENOTFOUND' || error.code === 'ENETUNREACH') {
+        console.error('Network connectivity issue in /api/devices:', error.code, error.message);
+        res.setHeader('Content-Type', 'application/json');
+        return res.status(503).json({ 
+          error: 'Network connectivity issue',
+          details: 'Unable to reach Google API. Please check your internet connection and try again.',
+          code: error.code
+        });
+      }
+      
+      // Handle timeout errors
+      if (error.code === 'ETIMEDOUT') {
+        console.error('Request timeout in /api/devices:', error.message);
+        res.setHeader('Content-Type', 'application/json');
+        return res.status(504).json({ 
+          error: 'Request timeout',
+          details: 'The request to Google API timed out. Please try again.',
+          code: error.code
+        });
+      }
+      
       if (error.response?.status === 429) {
         res.setHeader('Content-Type', 'application/json');
         return res.status(429).json({ 
@@ -546,7 +579,8 @@ try {
       res.setHeader('Content-Type', 'application/json');
       res.status(error.response?.status || 500).json({ 
         error: 'Failed to fetch devices',
-        details: error.message
+        details: error.message,
+        code: error.code
       });
     }
   });

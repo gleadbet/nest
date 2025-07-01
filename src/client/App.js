@@ -109,6 +109,20 @@ function App() {
           window.location.href = '/auth/login';
           return;
         }
+        
+        // Handle specific error types
+        if (response.status === 503) {
+          setError('Network connectivity issue. Unable to reach Google API. Please check your internet connection.');
+          setLoading(false);
+          return;
+        }
+        
+        if (response.status === 504) {
+          setError('Request timeout. The Google API is taking too long to respond. Please try again.');
+          setLoading(false);
+          return;
+        }
+        
         if (response.status === 429) {
           const newRetryCount = retryCount + 1;
           setRetryCount(newRetryCount);
@@ -121,6 +135,7 @@ function App() {
           }, backoffTime);
           return;
         }
+        
         throw new Error(data.details || data.error || 'Failed to fetch devices');
       }
 

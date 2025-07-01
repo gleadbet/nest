@@ -279,6 +279,9 @@ try {
   }
 
   async function fetchDeviceList(accessToken, forceRefresh = false, session = null) {
+    const startTime = Date.now();
+    console.log('fetchDeviceList started at:', new Date().toISOString());
+    
     const now = Date.now();
     
     // Check rate limit for devices endpoint
@@ -299,16 +302,21 @@ try {
     }
 
     try {
-      console.log('Fetching fresh device list...');
+      console.log('Fetching fresh device list from Google API...');
+      const apiStartTime = Date.now();
       
       const response = await axios.get(
         `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices`,
         {
           headers: {
             Authorization: `Bearer ${accessToken}`
-          }
+          },
+          timeout: 25000 // 25 second timeout for Google API call
         }
       );
+
+      const apiEndTime = Date.now();
+      console.log(`Google API response received after ${apiEndTime - apiStartTime}ms`);
 
       console.log('Raw API response:', response.data);
 
@@ -320,6 +328,9 @@ try {
       // Update cache
       deviceListCache = response.data.devices;
       lastDeviceListFetch = now;
+      
+      const totalTime = Date.now() - startTime;
+      console.log(`fetchDeviceList completed in ${totalTime}ms`);
       
       return response.data.devices;
     } catch (error) {
@@ -424,6 +435,9 @@ try {
   }
 
   app.get('/api/devices', async (req, res) => {
+    const requestStartTime = Date.now();
+    console.log('API /api/devices request started at:', new Date().toISOString());
+    
     try {
       const accessToken = req.session?.tokens?.access_token || req.session?.accessToken;
       
@@ -437,7 +451,11 @@ try {
       }
 
       console.log('Fetching devices with token:', accessToken.substring(0, 10) + '...');
+      const fetchStartTime = Date.now();
       const devices = await fetchDeviceList(accessToken, false, req.session);
+      const fetchEndTime = Date.now();
+      console.log(`Device list fetched in ${fetchEndTime - fetchStartTime}ms`);
+      
       console.log('Raw devices from API:', devices);
 
       const thermostats = devices
@@ -512,6 +530,9 @@ try {
       console.log('Sending response with thermostats:', thermostats);
       res.setHeader('Content-Type', 'application/json');
       res.json(thermostats);
+      
+      const totalRequestTime = Date.now() - requestStartTime;
+      console.log(`API /api/devices request completed in ${totalRequestTime}ms`);
     } catch (error) {
       console.error('Error in /api/devices:', error);
       if (error.response?.status === 429) {

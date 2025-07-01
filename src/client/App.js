@@ -85,7 +85,7 @@ function App() {
       
       // Add timeout to fetch request
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout (increased from 15s)
       
       const response = await fetch('/api/devices', {
         credentials: 'include',
@@ -162,9 +162,15 @@ function App() {
       });
       
       if (error.name === 'AbortError') {
-        console.error('Devices request timed out');
-        setError('Request timed out. Please check your connection and try again.');
+        console.error('Devices request timed out after 30 seconds');
+        setError('Request timed out after 30 seconds. The server may be processing a large amount of data. Please try again.');
         setLoading(false);
+        
+        // Retry after a short delay for timeout errors
+        setTimeout(() => {
+          console.log('Retrying devices fetch after timeout...');
+          fetchDevices();
+        }, 2000);
       } else {
         setError(error.message);
         setLoading(false);

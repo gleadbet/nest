@@ -1,9 +1,12 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>Nest Thermostat Control</title>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
   <script>
     // Add error handling for script loading
@@ -45,7 +48,8 @@
     // Add cache-busting parameter to force reload of bundle
     console.log('Loading bundle with cache-busting...');
     const script = document.createElement('script');
-    script.src = '/static/bundle.js?v=' + Date.now();
+    script.src = '/static/bundle.js?v=' + Date.now() + '&v=1.2.2'; // Force new version
+    console.log('Bundle URL:', script.src);
     
     script.onload = function() {
       console.log('Bundle loaded successfully at:', new Date().toISOString());

@@ -2,6 +2,10 @@
 
 A web-based thermostat control system for Nest devices, built with Express.js and React, featuring real-time temperature monitoring and control capabilities.
 
+## 3 Thermostats - Controllable setpoints - mode - real time graphic display
+
+<img width="2636" height="1440" alt="image" src="https://github.com/user-attachments/assets/0f085dc5-2b47-4177-a0c9-0c4417736295" />
+
 ## Requirements
 
 - Node.js >= 18.0.0

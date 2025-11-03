@@ -714,8 +714,40 @@ try {
     }
   });
 
-  // Add endpoint for updating temperature
-  app.post('/api/devices/:deviceId/temperature', async (req, res) => {
+  /**
+   * Temperature Update Endpoint (Legacy Express endpoint)
+   * 
+   * Handles temperature setpoint adjustments for Google Nest thermostats.
+   * This endpoint is used by the older client interface (src/client/App.js).
+   * 
+   * Recent Updates (v4.0):
+   * - HEATCOOL Mode Support: Uses SetRange command as required by Google Nest API
+   *   - Previously attempted to use SetHeat/SetCool individually, which were rejected
+   *   - SetRange command sets both heatCelsius and coolCelsius simultaneously
+   * - Command Re-evaluation: Verifies device state before executing commands
+   *   - Re-fetches device state immediately before command execution
+   *   - Re-evaluates which setpoint to update based on verified values
+   *   - Prevents "command not allowed" errors due to stale device state
+   * - Response Format: Always includes heatSetpoint and coolSetpoint for HEATCOOL mode
+   *   - Enables frontend to properly display and control setpoints
+   *   - Maintains button state after temperature adjustments
+   * 
+   * Endpoints:
+   *   - POST /api/devices/:deviceId/temperature (legacy)
+   *   - POST /api/devices/:deviceId/setTemperature (Next.js compatibility)
+   * 
+   * Request Body:
+   *   - temperature: number (required, 9-32°C)
+   *   - type: 'heat' | 'cool' (optional, inferred if not provided)
+   * 
+   * Response:
+   *   - Array with single updated device object
+   *   - Includes heatSetpoint and coolSetpoint for HEATCOOL mode
+   * 
+   * @version 4.0
+   * @date 2025-11-03
+   */
+  app.post(['/api/devices/:deviceId/temperature', '/api/devices/:deviceId/setTemperature'], async (req, res) => {
     try {
       const accessToken = req.session?.tokens?.access_token || req.session?.accessToken;
       
@@ -734,7 +766,7 @@ try {
       checkTemperatureDebounce(req.params.deviceId);
 
       const { deviceId } = req.params;
-      const { temperature } = req.body;
+      const { temperature, type } = req.body; // 'type' parameter from setTemperature endpoint ('heat' or 'cool')
 
       if (temperature === undefined || temperature === null) {
         return res.status(400).json({ error: 'Temperature is required' });
@@ -757,10 +789,14 @@ try {
       console.log('Updating temperature:', {
         deviceId,
         temperature: tempValue,
+        type: req.body.type, // 'heat' or 'cool' for HEATCOOL mode
         useFahrenheit: req.body.useFahrenheit
       });
 
       // OPTIMIZATION: Get current device state to check ECO mode and prevent conflicts
+      // FIX: Need to verify device mode right before executing command
+      // CHANGE: Fetch device state and validate mode before executing command
+      // WHY: Device mode might change or be different than expected, causing API errors
       const deviceResponse = await axios.get(
         `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
         {
@@ -774,8 +810,19 @@ try {
       const traits = device.traits || {};
       const thermostatModeTrait = traits['sdm.devices.traits.ThermostatMode'] || {};
       const ecoTrait = traits['sdm.devices.traits.ThermostatEco'] || {};
-      const baseMode = thermostatModeTrait.mode || 'HEAT';
+      let baseMode = thermostatModeTrait.mode || 'HEAT'; // Changed to let to allow reassignment after ECO mode change
       const isEcoMode = ecoTrait.mode === 'MANUAL_ECO';
+      
+      // FIX: Log actual device mode to help diagnose "command not allowed" errors
+      // CHANGE: Log device state before attempting command
+      // WHY: Google API errors about mode might indicate state mismatch
+      console.log('Device state before command:', {
+        deviceId,
+        baseMode,
+        isEcoMode,
+        availableModes: thermostatModeTrait.availableModes,
+        setpointTrait: traits['sdm.devices.traits.ThermostatTemperatureSetpoint']
+      });
 
       // RACE CONDITION FIX: If in ECO mode, disable it first with minimal delay
       if (isEcoMode) {
@@ -797,9 +844,46 @@ try {
         // OPTIMIZATION: Reduced wait time from 1000ms to 500ms
         // This minimizes the delay while still allowing the command to complete
         await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // FIX: After disabling ECO mode, refetch device state to get updated mode
+        // CHANGE: Fetch device again after ECO mode change to ensure accurate mode
+        // WHY: Mode might have changed and we need current state for command selection
+        const refreshedDeviceResponse = await axios.get(
+          `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`
+            }
+          }
+        );
+        const refreshedDevice = refreshedDeviceResponse.data;
+        const refreshedTraits = refreshedDevice.traits || {};
+        const refreshedThermostatModeTrait = refreshedTraits['sdm.devices.traits.ThermostatMode'] || {};
+        baseMode = refreshedThermostatModeTrait.mode || baseMode;
+        console.log('Device mode after ECO disable:', baseMode);
       }
 
       // Determine which command to use based on mode
+      // FIX: Previously HEATCOOL mode was rejected, causing "Cannot set temperature in HEATCOOL mode" error
+      // CHANGE: Support HEATCOOL mode by determining which setpoint to update based on current temperature
+      // WHY: In HEATCOOL mode, users can adjust either heat or cool setpoints independently
+      //      The old endpoint doesn't have a 'type' parameter, so we infer it from temperature comparison
+      
+      // FIX: setpointType was defined inside HEATCOOL block but used outside, causing "setpointType is not defined" error
+      // CHANGE: Define setpointType before mode checks so it's available for all modes
+      // WHY: Need setpointType for logging regardless of which mode branch executes
+      const setpointType = req.body.type; // 'heat' or 'cool' - may be undefined for legacy API calls
+      
+      // FIX: MIN_GAP needs to be accessible in verification block
+      // CHANGE: Define MIN_GAP at function scope so it's available everywhere
+      // WHY: Verification block re-evaluates commands and needs MIN_GAP for validation
+      const MIN_GAP = 1.7; // 1.7°C (3°F) minimum gap required by Nest API
+      
+      // FIX: inferredType scope issue - declare at function scope to prevent ReferenceError
+      // CHANGE: Declare inferredType outside HEATCOOL block so it's always accessible
+      // WHY: Error handlers or logging code might reference it, causing "inferredType is not defined" errors
+      let inferredType = null; // Track inferred type for logging - initialized to null
+      
       let command, params;
       if (baseMode === 'COOL') {
         command = 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetCool';
@@ -807,6 +891,151 @@ try {
       } else if (baseMode === 'HEAT') {
         command = 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetHeat';
         params = { heatCelsius: tempValue };
+      } else if (baseMode === 'HEATCOOL' || baseMode === 'AUTO') {
+        // FIX: Google Nest API requires SetRange command in HEATCOOL mode, not SetHeat/SetCool
+        // CHANGE: Always use SetRange command with both setpoints in HEATCOOL mode
+        // WHY: Google API does not allow individual SetHeat/SetCool commands in HEATCOOL mode
+        //      Must set both heatCelsius and coolCelsius together using SetRange
+        const setpointTrait = traits['sdm.devices.traits.ThermostatTemperatureSetpoint'] || {};
+        const currentHeat = setpointTrait.heatCelsius;
+        const currentCool = setpointTrait.coolCelsius;
+        const ambientTemp = traits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius;
+        
+        // FIX: Google Nest API requires minimum gap between heat and cool setpoints in HEATCOOL mode
+        // CHANGE: Validate setpoint relationships before making API call
+        // WHY: API rejects requests that violate heat < cool constraint
+        // Google Nest API typically requires 2-3°F gap (1.1-1.7°C), using 1.7°C to be safe
+        // Note: MIN_GAP is now defined at function scope above
+        
+        // Determine which setpoint to update and calculate new values
+        let newHeat = currentHeat;
+        let newCool = currentCool;
+        // Note: inferredType is declared at function scope above
+        
+        if (setpointType === 'heat') {
+          // Validate heat setpoint
+          if (typeof currentCool === 'number' && tempValue >= (currentCool - MIN_GAP)) {
+            return res.status(400).json({ 
+              error: 'Invalid setpoint',
+              details: `Heat setpoint (${tempValue.toFixed(1)}°C) must be at least ${MIN_GAP.toFixed(1)}°C below cool setpoint (${currentCool.toFixed(1)}°C)`
+            });
+          }
+          inferredType = 'heat'; // Set for consistency with logging code
+          newHeat = tempValue;
+          newCool = typeof currentCool === 'number' ? currentCool : tempValue + MIN_GAP;
+        } else if (setpointType === 'cool') {
+          // Validate cool setpoint
+          if (typeof currentHeat === 'number' && tempValue <= (currentHeat + MIN_GAP)) {
+            return res.status(400).json({ 
+              error: 'Invalid setpoint',
+              details: `Cool setpoint (${tempValue.toFixed(1)}°C) must be at least ${MIN_GAP.toFixed(1)}°C above heat setpoint (${currentHeat.toFixed(1)}°C)`
+            });
+          }
+          inferredType = 'cool'; // Set for consistency with logging code
+          newHeat = typeof currentHeat === 'number' ? currentHeat : tempValue - MIN_GAP;
+          newCool = tempValue;
+        } else {
+          // Infer type: if closer to heat setpoint, update heat; otherwise update cool
+          // FIX: Old client doesn't send type parameter, so we need to infer it intelligently
+          // CHANGE: Improve inference logic and provide better error messages
+          // WHY: When type is not provided, we must determine which setpoint to update
+          if (typeof currentHeat === 'number' && typeof currentCool === 'number') {
+            const heatDistance = Math.abs(tempValue - currentHeat);
+            const coolDistance = Math.abs(tempValue - currentCool);
+            
+            // Determine which setpoint is closer or if we're in the middle
+            // If the new temp is below the midpoint, we're likely adjusting heat
+            // If above the midpoint, we're likely adjusting cool
+            const midpoint = (currentHeat + currentCool) / 2;
+            
+            // FIX: inferredType was declared here but needs to use the outer scope variable
+            // CHANGE: Assign to outer inferredType instead of declaring new one
+            // WHY: Need to reference inferredType in logging code outside this block
+            if (tempValue < midpoint) {
+              inferredType = 'heat';
+            } else if (tempValue > midpoint) {
+              inferredType = 'cool';
+            } else {
+              // Exactly at midpoint - use distance
+              inferredType = heatDistance < coolDistance ? 'heat' : 'cool';
+            }
+            
+            if (inferredType === 'heat') {
+              // Update heat setpoint
+              if (tempValue >= (currentCool - MIN_GAP)) {
+                return res.status(400).json({ 
+                  error: 'Invalid setpoint',
+                  details: `Cannot set heat setpoint: must be at least ${MIN_GAP.toFixed(1)}°C below cool setpoint (${currentCool.toFixed(1)}°C). Current heat: ${currentHeat.toFixed(1)}°C, attempting: ${tempValue.toFixed(1)}°C. Maximum allowed: ${(currentCool - MIN_GAP).toFixed(1)}°C`
+                });
+              }
+              newHeat = tempValue;
+              newCool = currentCool; // Keep cool setpoint unchanged
+            } else {
+              // Update cool setpoint
+              if (tempValue <= (currentHeat + MIN_GAP)) {
+                return res.status(400).json({ 
+                  error: 'Invalid setpoint',
+                  details: `Cannot set cool setpoint: must be at least ${MIN_GAP.toFixed(1)}°C above heat setpoint (${currentHeat.toFixed(1)}°C). Current cool: ${currentCool.toFixed(1)}°C, attempting: ${tempValue.toFixed(1)}°C. Minimum allowed: ${(currentHeat + MIN_GAP).toFixed(1)}°C`
+                });
+              }
+              newHeat = currentHeat; // Keep heat setpoint unchanged
+              newCool = tempValue;
+            }
+          } else if (typeof currentHeat === 'number') {
+            // Only heat setpoint exists
+            inferredType = 'heat';
+            newHeat = tempValue;
+            newCool = tempValue + MIN_GAP; // Set cool to maintain gap
+          } else if (typeof currentCool === 'number') {
+            // Only cool setpoint exists
+            inferredType = 'cool';
+            newHeat = tempValue - MIN_GAP; // Set heat to maintain gap
+            newCool = tempValue;
+          } else {
+            // Default to heat if we can't determine
+            inferredType = 'heat';
+            newHeat = tempValue;
+            newCool = tempValue + MIN_GAP; // Set cool to maintain gap
+          }
+          
+          // FIX: Use SetRange command for HEATCOOL mode (required by Google API)
+          // CHANGE: Always use SetRange with both setpoints instead of individual SetHeat/SetCool
+          // WHY: Google Nest API does not allow SetHeat/SetCool in HEATCOOL mode
+          //      Must set both heatCelsius and coolCelsius together using SetRange
+          command = 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetRange';
+          params = { 
+            heatCelsius: newHeat,
+            coolCelsius: newCool
+          };
+          
+          // Determine which setpoint was updated for logging
+          // FIX: Safely reference inferredType to avoid ReferenceError
+          // CHANGE: Check if inferredType exists and is truthy before using it
+          // WHY: May prevent errors if variable scope is unexpected or if it's still null
+          let updatedSetpoint = setpointType;
+          try {
+            if (!updatedSetpoint && inferredType !== null && inferredType !== undefined) {
+              updatedSetpoint = inferredType;
+            }
+          } catch (e) {
+            // inferredType might not be in scope - use fallback
+            console.warn('Could not access inferredType for logging:', e.message);
+          }
+          if (!updatedSetpoint) {
+            // Determine from which value changed
+            const heatChanged = typeof currentHeat === 'number' && Math.abs(newHeat - currentHeat) > 0.1;
+            const coolChanged = typeof currentCool === 'number' && Math.abs(newCool - currentCool) > 0.1;
+            updatedSetpoint = heatChanged ? 'heat' : (coolChanged ? 'cool' : 'heat');
+          }
+          
+          console.log('Using SetRange command for HEATCOOL mode:', {
+            heatCelsius: newHeat,
+            coolCelsius: newCool,
+            updatedSetpoint: updatedSetpoint,
+            previousHeat: currentHeat,
+            previousCool: currentCool
+          });
+        }
       } else {
         return res.status(400).json({ 
           error: 'Unsupported thermostat mode',
@@ -815,20 +1044,347 @@ try {
       }
 
       // Update the temperature using the Smart Device Management API
-      const response = await axios.post(
-        `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}:executeCommand`,
-        {
-          command: command,
-          params: params
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`
+      // FIX: Verify device mode immediately before executing command
+      // CHANGE: Re-fetch device state right before command to ensure we have current mode
+      // WHY: Device mode might have changed between initial fetch and command execution
+      //      Google API "command not allowed" errors often indicate mode mismatch
+      let verifyResponse;
+      try {
+        verifyResponse = await axios.get(
+          `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`
+            }
+          }
+        );
+        const verifyDevice = verifyResponse.data;
+        const verifyTraits = verifyDevice.traits || {};
+        const verifyMode = verifyTraits['sdm.devices.traits.ThermostatMode']?.mode;
+        const verifyEcoMode = verifyTraits['sdm.devices.traits.ThermostatEco']?.mode === 'MANUAL_ECO';
+        
+        const verifySetpoints = verifyTraits['sdm.devices.traits.ThermostatTemperatureSetpoint'] || {};
+        console.log('Device mode verification before command:', {
+          deviceId,
+          command,
+          expectedMode: baseMode,
+          actualMode: verifyMode,
+          actualEcoMode: verifyEcoMode,
+          modeMatch: verifyMode === baseMode,
+          setpointTrait: verifySetpoints,
+          availableModes: verifyTraits['sdm.devices.traits.ThermostatMode']?.availableModes
+        });
+        
+        // FIX: Google API might reject SetHeat/SetCool in HEATCOOL if device state is inconsistent
+        // CHANGE: If mode doesn't match or if we detect potential issues, log warning
+        // WHY: Google API "command not allowed" errors may indicate device state issues
+        if (verifyMode !== baseMode) {
+          console.warn('Device mode mismatch detected - updating to actual mode:', {
+            expected: baseMode,
+            actual: verifyMode,
+            command: command
+          });
+          baseMode = verifyMode;
+          
+          // If mode changed to something other than HEATCOOL/AUTO, we might need to adjust command
+          if (baseMode !== 'HEATCOOL' && baseMode !== 'AUTO' && (command.includes('SetHeat') || command.includes('SetCool'))) {
+            console.error('Command mismatch with actual mode:', {
+              command,
+              actualMode: baseMode,
+              message: 'This command may be rejected by Google API'
+            });
+          }
+        } else if ((baseMode === 'HEATCOOL' || baseMode === 'AUTO') && (command.includes('SetHeat') || command.includes('SetCool'))) {
+          // FIX: Log additional diagnostics for HEATCOOL mode commands
+          // CHANGE: Check if setpoints are valid and mode is truly HEATCOOL
+          // WHY: Google API sometimes rejects commands even when mode appears correct
+          const hasHeatSetpoint = typeof verifySetpoints.heatCelsius === 'number';
+          const hasCoolSetpoint = typeof verifySetpoints.coolCelsius === 'number';
+          
+          if (!hasHeatSetpoint || !hasCoolSetpoint) {
+            console.warn('HEATCOOL mode but missing setpoints:', {
+              hasHeatSetpoint,
+              hasCoolSetpoint,
+              heatValue: verifySetpoints.heatCelsius,
+              coolValue: verifySetpoints.coolCelsius,
+              command: command
+            });
+          }
+          
+          // FIX: For HEATCOOL mode, ensure we're using SetRange command (required by Google API)
+          // CHANGE: If command is not SetRange, convert it to SetRange with both setpoints
+          // WHY: Google Nest API requires SetRange in HEATCOOL mode, not individual SetHeat/SetCool
+          if (command.includes('SetHeat') || command.includes('SetCool')) {
+            console.warn('Command should be SetRange for HEATCOOL mode, converting:', {
+              originalCommand: command,
+              originalParams: params,
+              verifyHeat: verifySetpoints.heatCelsius,
+              verifyCool: verifySetpoints.coolCelsius
+            });
+            
+            // Convert to SetRange - use params if they exist, otherwise use verified setpoints
+            const rangeHeat = params?.heatCelsius || verifySetpoints.heatCelsius || tempValue;
+            const rangeCool = params?.coolCelsius || verifySetpoints.coolCelsius || (tempValue + MIN_GAP);
+            
+            command = 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetRange';
+            params = {
+              heatCelsius: rangeHeat,
+              coolCelsius: rangeCool
+            };
+            
+            console.log('✓ Converted command to SetRange for HEATCOOL mode');
+          }
+          
+          // FIX: Use verified setpoints if they differ from initial setpoints and type wasn't provided
+          // CHANGE: Re-evaluate command if verification shows different setpoint values
+          // WHY: Device state might have changed between initial fetch and command execution
+          //      Google API might reject commands based on stale setpoint inference
+          // NOTE: This is now less critical since we're using SetRange, but still useful for accuracy
+          if (!setpointType && hasHeatSetpoint && hasCoolSetpoint && command.includes('SetRange')) {
+            const verifyHeat = verifySetpoints.heatCelsius;
+            const verifyCool = verifySetpoints.coolCelsius;
+            
+            // Get initial setpoints from the command params to compare
+            const initialHeatFromParams = params?.heatCelsius;
+            const initialCoolFromParams = params?.coolCelsius;
+            // For SetRange command, extract setpoints from params
+            const initialHeatFromCommand = params?.heatCelsius || verifyHeat;
+            const initialCoolFromCommand = params?.coolCelsius || verifyCool;
+            
+            // Determine which setpoint is being updated (whichever is closer to tempValue)
+            const paramsHeatDiff = params?.heatCelsius ? Math.abs(params.heatCelsius - tempValue) : Infinity;
+            const paramsCoolDiff = params?.coolCelsius ? Math.abs(params.coolCelsius - tempValue) : Infinity;
+            const updatingHeatInParams = paramsHeatDiff < paramsCoolDiff;
+            
+            console.log('Verified setpoints before command execution:', {
+              verifyHeat,
+              verifyCool,
+              command,
+              params,
+              willUpdate: updatingHeatInParams ? 'heat' : 'cool'
+            });
+            
+            // FIX: Re-evaluate which setpoint to update based on verified values
+            // CHANGE: Use verified setpoints for inference instead of potentially stale initial values
+            // WHY: Google API validates against current device state, so we should use verified setpoints for inference
+            const heatDiff = Math.abs(verifyHeat - (initialHeatFromCommand || 0));
+            const coolDiff = Math.abs(verifyCool - (initialCoolFromCommand || 0));
+            
+            // Always re-evaluate using verified setpoints to ensure we use the most current state
+            // FIX: Use verified setpoints for inference to match what Google API sees
+            // CHANGE: Re-calculate inference based on verified setpoints instead of initial values
+            // WHY: Even if setpoints haven't changed, using verified values ensures consistency with Google API state
+            console.log('Re-evaluating command using verified setpoints:', {
+              verifiedHeat: verifyHeat,
+              verifiedCool: verifyCool,
+              tempValue: tempValue,
+              currentCommand: command
+            });
+            
+            // Re-evaluate which setpoint to update based on verified values (always do this to match Google API state)
+            const verifiedHeatDistance = Math.abs(tempValue - verifyHeat);
+            const verifiedCoolDistance = Math.abs(tempValue - verifyCool);
+            const verifiedMidpoint = (verifyHeat + verifyCool) / 2;
+            
+            let shouldBeHeat = tempValue < verifiedMidpoint || 
+                              (tempValue === verifiedMidpoint && verifiedHeatDistance < verifiedCoolDistance);
+            
+            // For SetRange command, check which setpoint in params is being updated
+            const currentParamsHeat = params?.heatCelsius;
+            const currentParamsCool = params?.coolCelsius;
+            // Determine if we're updating heat or cool based on which is closer to tempValue
+            const paramsHeatDistance = currentParamsHeat !== undefined ? Math.abs(currentParamsHeat - tempValue) : Infinity;
+            const paramsCoolDistance = currentParamsCool !== undefined ? Math.abs(currentParamsCool - tempValue) : Infinity;
+            const currentIsHeat = paramsHeatDistance < paramsCoolDistance;
+            
+            console.log('Re-evaluation result:', {
+              tempValue,
+              verifiedHeat,
+              verifiedCool,
+              verifiedMidpoint,
+              verifiedHeatDistance,
+              verifiedCoolDistance,
+              shouldBeHeat,
+              currentIsHeat,
+              currentCommand: command,
+              willUpdate: shouldBeHeat !== currentIsHeat ? 'YES - command mismatch' : 'NO - command matches'
+            });
+            
+            if (shouldBeHeat !== currentIsHeat) {
+              console.warn('Command mismatch detected based on verified setpoints, updating command:', {
+                inferredCommand: command,
+                shouldBeCommand: shouldBeHeat ? 'SetHeat' : 'SetCool',
+                tempValue,
+                verifiedHeat,
+                verifiedCool,
+                verifiedMidpoint
+              });
+              
+              // FIX: Update command/params to match verified setpoints using SetRange
+              // CHANGE: Use verified setpoints to determine correct command, but always use SetRange for HEATCOOL
+              // WHY: Google API validates against current device state, and requires SetRange in HEATCOOL mode
+              if (shouldBeHeat) {
+                if (tempValue >= (verifyCool - MIN_GAP)) {
+                  console.error('Cannot update heat - would violate gap requirement with verified cool setpoint:', {
+                    tempValue,
+                    verifyCool,
+                    minGap: MIN_GAP,
+                    maxAllowedHeat: verifyCool - MIN_GAP
+                  });
+                } else {
+                  // Use SetRange with updated heat and current cool
+                  command = 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetRange';
+                  params = { 
+                    heatCelsius: tempValue,
+                    coolCelsius: verifyCool
+                  };
+                  console.log('✓ Updated command to SetRange (updating heat) based on verified setpoints');
+                }
+              } else {
+                if (tempValue <= (verifyHeat + MIN_GAP)) {
+                  console.error('Cannot update cool - would violate gap requirement with verified heat setpoint:', {
+                    tempValue,
+                    verifyHeat,
+                    minGap: MIN_GAP,
+                    minAllowedCool: verifyHeat + MIN_GAP
+                  });
+                } else {
+                  // Use SetRange with current heat and updated cool
+                  command = 'sdm.devices.commands.ThermostatTemperatureSetpoint.SetRange';
+                  params = { 
+                    heatCelsius: verifyHeat,
+                    coolCelsius: tempValue
+                  };
+                  console.log('✓ Updated command to SetRange (updating cool) based on verified setpoints');
+                }
+              }
+            } else {
+              console.log('Command matches re-evaluation - using:', command);
+            }
           }
         }
-      );
+      } catch (verifyError) {
+        // If verification fails, continue anyway - not critical
+        console.warn('Could not verify device mode before command:', verifyError.message);
+      }
+      
+      // FIX: setpointType might be undefined for legacy API calls (HEAT/COOL modes)
+      // CHANGE: Only include type in log if it's defined
+      // WHY: Avoid logging undefined values, but include it when available for debugging
+      console.log('Executing temperature command:', {
+        deviceId,
+        command,
+        params,
+        mode: baseMode,
+        ...(setpointType ? { type: setpointType } : {})
+      });
+      
+      let response;
+      try {
+        response = await axios.post(
+          `https://smartdevicemanagement.googleapis.com/v1/enterprises/${process.env.GOOGLE_PROJECT_ID}/devices/${deviceId}:executeCommand`,
+          {
+            command: command,
+            params: params
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`
+            }
+          }
+        );
+        console.log('Temperature update response:', response.data);
+      } catch (error) {
+        // Enhanced error logging for Google API errors
+        // FIX: Provide more detailed error messages to help diagnose 400 errors
+        // CHANGE: Extract and log detailed error information from Google API
+        // WHY: 400 errors from Google API often have specific reasons that need to be surfaced
+        const errorStatus = error.response?.status;
+        const errorData = error.response?.data;
+        const errorMessage = errorData?.error?.message || errorData?.message || error.message;
+        const errorDetails = errorData?.error?.details || errorData?.details || errorData;
+        
+        console.error('Google API Error:', {
+          status: errorStatus,
+          statusText: error.response?.statusText,
+          errorData: errorData,
+          errorMessage: errorMessage,
+          command,
+          params,
+          deviceId,
+          mode: baseMode,
+          setpointType: setpointType || 'inferred'
+        });
+        
+        // Return a more user-friendly error message for 400 errors
+        // FIX: Need to return response instead of throwing to prevent unhandled error
+        // CHANGE: Return proper HTTP response for 400 errors from Google API
+        // WHY: Client needs structured error response, not thrown exception
+        // FIX: Ensure error details are always strings, not objects
+        // CHANGE: Convert errorDetails to string if it's an object
+        // WHY: Frontend expects string error messages, not objects (prevents "[object Object]")
+        // FIX: Return early to prevent ERR_HTTP_HEADERS_SENT error
+        // CHANGE: Use return to stop execution after sending error response
+        // WHY: If we don't return here, code continues and tries to send another response
+        if (errorStatus === 400) {
+          res.setHeader('Content-Type', 'application/json');
+          let detailsMessage = errorDetails;
+          if (detailsMessage && typeof detailsMessage !== 'string') {
+            // If errorDetails is an object, extract the message or stringify it
+            if (detailsMessage.message) {
+              detailsMessage = detailsMessage.message;
+            } else {
+              detailsMessage = JSON.stringify(detailsMessage);
+            }
+          }
+          if (!detailsMessage) {
+            // Use the Google API error message if we have it
+            if (errorMessage && errorMessage !== 'Invalid request to Google API') {
+              detailsMessage = errorMessage;
+            } else {
+              detailsMessage = `The temperature value or setpoint relationship may be invalid. Command: ${command}, Params: ${JSON.stringify(params)}`;
+            }
+          }
+          
+          // FIX: Include the actual Google API error message in details
+          // CHANGE: Use the Google API error message directly if available
+          // WHY: The Google API error message explains why the command failed
+          const finalErrorMessage = errorMessage || 'Invalid request to Google API';
+          const finalDetails = detailsMessage || finalErrorMessage;
+          
+          // FIX: If Google API says command not allowed in HEATCOOL mode, provide helpful guidance
+          // CHANGE: Check for specific error about command not allowed and suggest using type parameter
+          // WHY: When old client doesn't send type, inference might work but Google API rejects anyway
+          let enhancedDetails = finalDetails;
+          if (errorMessage && errorMessage.includes('command not allowed in current thermostat mode') && 
+              (baseMode === 'HEATCOOL' || baseMode === 'AUTO') && !setpointType) {
+            enhancedDetails = `${finalDetails}. Note: In HEATCOOL mode, the API requires specifying which setpoint to adjust (heat or cool). Please use a client that supports this feature, or switch to HEAT or COOL mode to adjust temperatures.`;
+          }
+          
+          // FIX: Return error message in a format that frontend can easily extract
+          // CHANGE: Put the actual Google API error message in both error and details fields
+          // WHY: Frontend expects error.message or error.details, but Google error is nested
+          return res.status(400).json({
+            error: finalErrorMessage,
+            details: enhancedDetails,
+            message: finalErrorMessage, // Also include at top level for easier extraction
+            googleError: errorData, // Include full error for debugging
+            suggestion: (errorMessage && errorMessage.includes('command not allowed') && !setpointType) 
+              ? 'Try using a client that supports HEATCOOL mode with explicit heat/cool setpoint controls'
+              : undefined
+          });
+        }
+        
+        // For other errors, throw to be caught by outer try/catch
+        throw error;
+      }
 
-      console.log('Temperature update response:', response.data);
+      // FIX: Only continue if we have a valid response
+      // CHANGE: Check that response exists before using it
+      // WHY: If there was an error above, response will be undefined
+      if (!response) {
+        return; // Response was already sent in error handler
+      }
 
       // OPTIMIZATION: Reduced wait time from 2000ms to 500ms
       // This provides faster response while ensuring the Nest API has processed the change
@@ -860,16 +1416,32 @@ try {
       const updatedBaseMode = updatedThermostatModeTrait.mode || 'OFF';
       const updatedMode = isUpdatedEcoMode ? `ECO (${updatedBaseMode})` : updatedBaseMode;
 
+      // FIX: Response handling must include HEATCOOL mode and setpoints
+      // CHANGE: Extract both heat and cool setpoints for HEATCOOL mode
+      // WHY: After SetRange command, need to return both setpoints and formatted targetTemp
+      const updatedSetpointTrait = updatedTraits['sdm.devices.traits.ThermostatTemperatureSetpoint'] || {};
+      const updatedHeatSetpoint = updatedSetpointTrait.heatCelsius;
+      const updatedCoolSetpoint = updatedSetpointTrait.coolCelsius;
+      
       let updatedTargetTemp = 'N/A';
       if (isUpdatedEcoMode) {
         const heatTemp = typeof updatedEcoTrait.heatCelsius === 'number' ? Number(updatedEcoTrait.heatCelsius.toFixed(1)) : 'N/A';
         const coolTemp = typeof updatedEcoTrait.coolCelsius === 'number' ? Number(updatedEcoTrait.coolCelsius.toFixed(1)) : 'N/A';
         updatedTargetTemp = `ECO (${heatTemp}°C - ${coolTemp}°C)`;
+      } else if (updatedBaseMode === 'HEATCOOL' || updatedBaseMode === 'AUTO') {
+        // Format targetTemp as range for HEATCOOL mode
+        if (typeof updatedHeatSetpoint === 'number' && typeof updatedCoolSetpoint === 'number') {
+          updatedTargetTemp = `${Number(updatedHeatSetpoint.toFixed(1))}°C - ${Number(updatedCoolSetpoint.toFixed(1))}°C`;
+        } else if (typeof updatedHeatSetpoint === 'number') {
+          updatedTargetTemp = Number(updatedHeatSetpoint.toFixed(1));
+        } else if (typeof updatedCoolSetpoint === 'number') {
+          updatedTargetTemp = Number(updatedCoolSetpoint.toFixed(1));
+        }
       } else if (updatedBaseMode === 'COOL') {
-        const temp = updatedTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius;
+        const temp = updatedSetpointTrait.coolCelsius;
         updatedTargetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
       } else if (updatedBaseMode === 'HEAT') {
-        const temp = updatedTraits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius;
+        const temp = updatedSetpointTrait.heatCelsius;
         updatedTargetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
       }
 
@@ -886,7 +1458,12 @@ try {
           ? Number(updatedTraits['sdm.devices.traits.Humidity'].ambientHumidityPercent.toFixed(1))
           : 'N/A',
         availableModes: updatedThermostatModeTrait.availableModes || ['HEAT', 'COOL', 'HEATCOOL', 'OFF'],
-        hasEcoTrait: !!updatedTraits['sdm.devices.traits.ThermostatEco']
+        hasEcoTrait: !!updatedTraits['sdm.devices.traits.ThermostatEco'],
+        // FIX: Include setpoints in response for HEATCOOL mode
+        // CHANGE: Always include heatSetpoint and coolSetpoint in response
+        // WHY: Frontend needs these values to display and control setpoints
+        heatSetpoint: typeof updatedHeatSetpoint === 'number' ? Number(updatedHeatSetpoint.toFixed(1)) : undefined,
+        coolSetpoint: typeof updatedCoolSetpoint === 'number' ? Number(updatedCoolSetpoint.toFixed(1)) : undefined
       };
 
       res.setHeader('Content-Type', 'application/json');

@@ -38,18 +38,34 @@ interface DeviceTableProps {
 
 /**
  * TemperatureDial Component
- * Displays a real-time temperature gauge with WebSocket updates and REST fallback
+ * 
+ * Displays a real-time temperature gauge with WebSocket updates and REST fallback.
+ * Provides full setpoint control for both individual modes (HEAT/COOL) and dual-mode (HEATCOOL).
+ * 
+ * Recent Updates (v4.0):
+ * - HEATCOOL Mode Support: Full support for adjusting heat and cool setpoints independently
+ *   - Separate controls for heat setpoint and cool setpoint in HEATCOOL mode
+ *   - Validates minimum gap (1.7°C) between setpoints to meet Google Nest API requirements
+ *   - Buttons are intelligently disabled when adjustments would violate constraints
+ * - Immediate State Updates: Updates local state immediately after successful API calls
+ *   - Prevents buttons from being disabled while waiting for WebSocket updates
+ *   - Uses response data from setTemperature endpoint to update deviceData state
+ * 
  * Features:
  * - Real-time temperature monitoring via WebSocket
  * - Fallback to REST API polling
  * - Temperature unit toggle (Fahrenheit/Celsius)
  * - Custom device naming
  * - Configurable update interval
+ * - Separate heat/cool setpoint controls for HEATCOOL mode
  * 
  * Authentication:
  * - Uses NextAuth.js for session management
  * - Automatically handles token refresh through useSession hook
  * - Reconnects WebSocket when token is refreshed
+ * 
+ * @version 4.0
+ * @date 2025-11-03
  */
 export default function DeviceTable({ deviceId, refreshInterval = 60000, setpointIncrement = 0.5 }: DeviceTableProps) {
   // Entry logging
@@ -432,8 +448,39 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
   };
 
   // Update setpoint adjustment function
+  // FIX: Added validation to prevent invalid setpoint adjustments in HEATCOOL mode
+  // CHANGE: Validate setpoint relationships before making API call
+  // WHY: Google Nest API requires minimum gap between heat and cool setpoints
   const adjustSetpoint = async (type: 'heat' | 'cool', value: number) => {
     if (pendingSetpoint) return; // Prevent multiple changes while pending
+    
+    // Validate setpoint relationships for HEATCOOL mode
+    // FIX: Google Nest API requires minimum 2-3°F gap between setpoints
+    // CHANGE: Use 1.7°C (3°F) to ensure we stay above the minimum requirement
+    // WHY: API rejects requests that don't maintain proper gap between setpoints
+    if (deviceData?.mode === 'HEATCOOL' || deviceData?.mode === 'AUTO') {
+      const MIN_GAP = 1.7; // Minimum gap required by Nest API (1.7°C = 3°F to be safe)
+      const currentHeat = deviceData.heatSetpoint;
+      const currentCool = deviceData.coolSetpoint;
+      
+      if (type === 'heat' && typeof currentCool === 'number') {
+        const maxHeat = currentCool - MIN_GAP;
+        if (value > maxHeat) {
+          setSetpointStatus(`Cannot set heat setpoint: must be at least ${MIN_GAP.toFixed(1)}°C below cool setpoint (${currentCool.toFixed(1)}°C). Maximum: ${maxHeat.toFixed(1)}°C`);
+          setTimeout(() => setSetpointStatus(''), 5000);
+          return;
+        }
+      }
+      
+      if (type === 'cool' && typeof currentHeat === 'number') {
+        const minCool = currentHeat + MIN_GAP;
+        if (value < minCool) {
+          setSetpointStatus(`Cannot set cool setpoint: must be at least ${MIN_GAP.toFixed(1)}°C above heat setpoint (${currentHeat.toFixed(1)}°C). Minimum: ${minCool.toFixed(1)}°C`);
+          setTimeout(() => setSetpointStatus(''), 5000);
+          return;
+        }
+      }
+    }
     
     try {
       setAdjustingSetpoint(type);
@@ -453,15 +500,54 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
       });
 
       if (!response.ok) {
-        throw new Error('Failed to update setpoint');
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage = errorData.error || errorData.details || `Failed to update ${type} setpoint (${response.status})`;
+        console.error('Error updating setpoint:', {
+          status: response.status,
+          statusText: response.statusText,
+          error: errorData,
+          type,
+          value
+        });
+        throw new Error(errorMessage);
+      }
+      
+      const result = await response.json().catch(() => ({}));
+      console.log('Setpoint update successful:', { type, value, result });
+      
+      // FIX: Update local state immediately with new setpoints from response
+      // CHANGE: Update deviceData state optimistically using response data
+      // WHY: Prevents buttons from being disabled while waiting for WebSocket/refresh
+      if (result?.device && deviceData) {
+        const updatedDeviceData = {
+          ...deviceData,
+          mode: result.device.mode || deviceData.mode,
+          heatSetpoint: result.device.heatSetpoint !== undefined 
+            ? result.device.heatSetpoint 
+            : (type === 'heat' ? value : deviceData.heatSetpoint),
+          coolSetpoint: result.device.coolSetpoint !== undefined 
+            ? result.device.coolSetpoint 
+            : (type === 'cool' ? value : deviceData.coolSetpoint)
+        };
+        setDeviceData(updatedDeviceData);
+        console.log('Updated deviceData state:', updatedDeviceData);
+      } else if (deviceData) {
+        // Fallback: update optimistically if response doesn't have device data
+        const updatedDeviceData = {
+          ...deviceData,
+          [type === 'heat' ? 'heatSetpoint' : 'coolSetpoint']: value
+        };
+        setDeviceData(updatedDeviceData);
+        console.log('Updated deviceData state (optimistic):', updatedDeviceData);
       }
       
       // Don't clear pending state here - wait for the actual update
     } catch (error) {
       console.error('Error updating setpoint:', error);
-      setSetpointStatus(`Failed to update ${type} setpoint`);
+      const errorMessage = error instanceof Error ? error.message : `Failed to update ${type} setpoint`;
+      setSetpointStatus(errorMessage);
       setPendingSetpoint(null);
-      setTimeout(() => setSetpointStatus(''), 3000);
+      setTimeout(() => setSetpointStatus(''), 5000);
     } finally {
       setAdjustingSetpoint(null);
     }
@@ -842,35 +928,62 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
                 {deviceData.heatSetpoint !== undefined && deviceData.heatSetpoint !== null && !isNaN(deviceData.heatSetpoint) ? (
                   <div className="flex flex-col gap-1">
                     <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => adjustSetpoint('heat', deviceData.heatSetpoint! - (setpointIncrement || 0.5))}
-                        disabled={pendingSetpoint !== null}
-                        className={`px-2 py-1 rounded transition-colors ${
-                          pendingSetpoint?.type === 'heat'
-                            ? 'bg-red-200 text-red-900 cursor-not-allowed'
-                            : pendingSetpoint
-                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                              : 'bg-red-100 text-red-800 hover:bg-red-200'
-                        }`}
-                      >
-                        {pendingSetpoint?.type === 'heat' ? '...' : '-'}
-                      </button>
-                      <span className="w-16 text-center">
-                        {deviceData.heatSetpoint.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.heatSetpoint).toFixed(1)}°F
-                      </span>
-                      <button
-                        onClick={() => adjustSetpoint('heat', deviceData.heatSetpoint! + (setpointIncrement || 0.5))}
-                        disabled={pendingSetpoint !== null}
-                        className={`px-2 py-1 rounded transition-colors ${
-                          pendingSetpoint?.type === 'heat'
-                            ? 'bg-red-200 text-red-900 cursor-not-allowed'
-                            : pendingSetpoint
-                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                              : 'bg-red-100 text-red-800 hover:bg-red-200'
-                        }`}
-                      >
-                        {pendingSetpoint?.type === 'heat' ? '...' : '+'}
-                      </button>
+                      {(() => {
+                        // Calculate if increment/decrement buttons should be disabled
+                        const increment = setpointIncrement || 0.5;
+                        const newHeatDown = deviceData.heatSetpoint! - increment;
+                        const newHeatUp = deviceData.heatSetpoint! + increment;
+                        const MIN_GAP = 1.7; // Minimum gap required by Nest API (1.7°C = 3°F)
+                        
+                        // Disable down button if it would go below minimum (9°C)
+                        const canDecrement = newHeatDown >= 9;
+                        
+                        // Disable up button in HEATCOOL mode if it would violate gap constraint
+                        let canIncrement = true;
+                        if ((deviceData.mode === 'HEATCOOL' || deviceData.mode === 'AUTO') && 
+                            typeof deviceData.coolSetpoint === 'number') {
+                          const maxHeat = deviceData.coolSetpoint - MIN_GAP;
+                          canIncrement = newHeatUp <= maxHeat;
+                        }
+                        
+                        return (
+                          <>
+                            <button
+                              onClick={() => adjustSetpoint('heat', newHeatDown)}
+                              disabled={pendingSetpoint !== null || !canDecrement}
+                              className={`px-2 py-1 rounded transition-colors ${
+                                pendingSetpoint?.type === 'heat'
+                                  ? 'bg-red-200 text-red-900 cursor-not-allowed'
+                                  : pendingSetpoint || !canDecrement
+                                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                    : 'bg-red-100 text-red-800 hover:bg-red-200'
+                              }`}
+                              title={!canDecrement ? 'Minimum temperature reached (9°C)' : ''}
+                            >
+                              {pendingSetpoint?.type === 'heat' ? '...' : '-'}
+                            </button>
+                            <span className="w-16 text-center">
+                              {deviceData.heatSetpoint.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.heatSetpoint).toFixed(1)}°F
+                            </span>
+                            <button
+                              onClick={() => adjustSetpoint('heat', newHeatUp)}
+                              disabled={pendingSetpoint !== null || !canIncrement}
+                              className={`px-2 py-1 rounded transition-colors ${
+                                pendingSetpoint?.type === 'heat'
+                                  ? 'bg-red-200 text-red-900 cursor-not-allowed'
+                                  : pendingSetpoint || !canIncrement
+                                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                    : 'bg-red-100 text-red-800 hover:bg-red-200'
+                              }`}
+                              title={!canIncrement && (deviceData.mode === 'HEATCOOL' || deviceData.mode === 'AUTO') 
+                                ? `Cannot exceed ${((deviceData.coolSetpoint! - MIN_GAP)).toFixed(1)}°C (must stay ${MIN_GAP.toFixed(1)}°C below cool setpoint)` 
+                                : ''}
+                            >
+                              {pendingSetpoint?.type === 'heat' ? '...' : '+'}
+                            </button>
+                          </>
+                        );
+                      })()}
                     </div>
                     <div className="flex items-center gap-2 text-sm text-gray-600">
                       <span>Increment: {(setpointIncrement || 0.5).toFixed(1)}°</span>
@@ -910,35 +1023,62 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
                 {deviceData.coolSetpoint !== undefined && deviceData.coolSetpoint !== null && !isNaN(deviceData.coolSetpoint) ? (
                   <div className="flex flex-col gap-1">
                     <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => adjustSetpoint('cool', deviceData.coolSetpoint! - (setpointIncrement || 0.5))}
-                        disabled={pendingSetpoint !== null}
-                        className={`px-2 py-1 rounded transition-colors ${
-                          pendingSetpoint?.type === 'cool'
-                            ? 'bg-blue-200 text-blue-900 cursor-not-allowed'
-                            : pendingSetpoint
-                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                              : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
-                        }`}
-                      >
-                        {pendingSetpoint?.type === 'cool' ? '...' : '-'}
-                      </button>
-                      <span className="w-16 text-center">
-                        {deviceData.coolSetpoint.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.coolSetpoint).toFixed(1)}°F
-                      </span>
-                      <button
-                        onClick={() => adjustSetpoint('cool', deviceData.coolSetpoint! + (setpointIncrement || 0.5))}
-                        disabled={pendingSetpoint !== null}
-                        className={`px-2 py-1 rounded transition-colors ${
-                          pendingSetpoint?.type === 'cool'
-                            ? 'bg-blue-200 text-blue-900 cursor-not-allowed'
-                            : pendingSetpoint
-                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                              : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
-                        }`}
-                      >
-                        {pendingSetpoint?.type === 'cool' ? '...' : '+'}
-                      </button>
+                      {(() => {
+                        // Calculate if increment/decrement buttons should be disabled
+                        const increment = setpointIncrement || 0.5;
+                        const newCoolDown = deviceData.coolSetpoint! - increment;
+                        const newCoolUp = deviceData.coolSetpoint! + increment;
+                        const MIN_GAP = 1.7; // Minimum gap required by Nest API (1.7°C = 3°F)
+                        
+                        // Disable down button in HEATCOOL mode if it would violate gap constraint
+                        let canDecrement = true;
+                        if ((deviceData.mode === 'HEATCOOL' || deviceData.mode === 'AUTO') && 
+                            typeof deviceData.heatSetpoint === 'number') {
+                          const minCool = deviceData.heatSetpoint + MIN_GAP;
+                          canDecrement = newCoolDown >= minCool;
+                        }
+                        
+                        // Disable up button if it would go above maximum (32°C)
+                        const canIncrement = newCoolUp <= 32;
+                        
+                        return (
+                          <>
+                            <button
+                              onClick={() => adjustSetpoint('cool', newCoolDown)}
+                              disabled={pendingSetpoint !== null || !canDecrement}
+                              className={`px-2 py-1 rounded transition-colors ${
+                                pendingSetpoint?.type === 'cool'
+                                  ? 'bg-blue-200 text-blue-900 cursor-not-allowed'
+                                  : pendingSetpoint || !canDecrement
+                                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                    : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
+                              }`}
+                              title={!canDecrement && (deviceData.mode === 'HEATCOOL' || deviceData.mode === 'AUTO')
+                                ? `Cannot go below ${((deviceData.heatSetpoint! + MIN_GAP)).toFixed(1)}°C (must stay ${MIN_GAP.toFixed(1)}°C above heat setpoint)`
+                                : ''}
+                            >
+                              {pendingSetpoint?.type === 'cool' ? '...' : '-'}
+                            </button>
+                            <span className="w-16 text-center">
+                              {deviceData.coolSetpoint.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.coolSetpoint).toFixed(1)}°F
+                            </span>
+                            <button
+                              onClick={() => adjustSetpoint('cool', newCoolUp)}
+                              disabled={pendingSetpoint !== null || !canIncrement}
+                              className={`px-2 py-1 rounded transition-colors ${
+                                pendingSetpoint?.type === 'cool'
+                                  ? 'bg-blue-200 text-blue-900 cursor-not-allowed'
+                                  : pendingSetpoint || !canIncrement
+                                    ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                    : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
+                              }`}
+                              title={!canIncrement ? 'Maximum temperature reached (32°C)' : ''}
+                            >
+                              {pendingSetpoint?.type === 'cool' ? '...' : '+'}
+                            </button>
+                          </>
+                        );
+                      })()}
                     </div>
                     <div className="flex items-center gap-2 text-sm text-gray-600">
                       <span>Increment: {(setpointIncrement || 0.5).toFixed(1)}°</span>

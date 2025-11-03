@@ -1,6 +1,6 @@
 {
   "name": "nest-thermostat-control",
-  "version": "1.0.0",
+  "version": "4.0.1",
   "description": "Nest Thermostat Control Application",
   "main": "src/index.js",
   "scripts": {

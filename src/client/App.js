@@ -1,5 +1,46 @@
+/**
+ * Main React Application Component
+ * 
+ * This application provides a thermostat control interface for Google Nest and Honeywell devices.
+ * 
+ * Recent Updates (v4.0):
+ * - HEATCOOL Mode Support: Fixed increment/decrement buttons to work correctly in HEATCOOL mode
+ *   - Buttons now check for heatSetpoint/coolSetpoint in HEATCOOL mode instead of requiring numeric targetTemp
+ *   - Handlers now use setpoint values directly for HEATCOOL mode temperature adjustments
+ * - Improved button state management: Buttons remain enabled after temperature adjustments
+ * 
+ * Key Features:
+ * - Real-time device status monitoring with WebSocket support
+ * - Temperature adjustment controls with validation
+ * - Mode switching (HEAT, COOL, HEATCOOL, OFF, ECO)
+ * - Device naming and customization
+ * - Temperature graph visualization
+ * 
+ * @version 4.0
+ * @date 2025-11-03
+ */
+
 import React, { useState, useEffect } from 'react';
 import TemperatureGraph from '../components/TemperatureGraph';
+
+/**
+ * Legacy Client Application - Device Management Interface
+ * 
+ * This is the original React application that provides a table-based interface
+ * for managing Google Nest and Honeywell thermostats.
+ * 
+ * Key Features:
+ * - Device list display with temperature controls
+ * - Mode switching (HEAT, COOL, HEATCOOL, OFF, ECO)
+ * - Temperature increment/decrement controls
+ * - Real-time device status updates
+ * 
+ * Version 4.0.1 Changes:
+ * - Fixed increment/decrement button disabling in HEATCOOL mode
+ * - Updated validation to use heatSetpoint/coolSetpoint for HEATCOOL mode
+ * - Improved button disabled logic to handle string targetTemp values
+ * - Enhanced onClick handlers to properly adjust setpoints in HEATCOOL mode
+ */
 
 function App() {
   const [devices, setDevices] = useState([]);
@@ -317,8 +358,38 @@ function App() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.details || errorData.error || 'Failed to update temperature');
+        const errorData = await response.json().catch(() => ({}));
+        // FIX: Handle case where error.error or error.details might be objects
+        // CHANGE: Safely extract error message, handling objects and strings
+        // WHY: Server may return error objects that need to be stringified properly
+        let errorMessage = 'Failed to update temperature';
+        // FIX: Prioritize error.message over other fields for Google API errors
+        // CHANGE: Check error.message first, then details, then nested error object
+        // WHY: Google API often puts the actual error in error.message field
+        // FIX: Handle nested error structure - errorData.error.error.message
+        // CHANGE: Check all possible nested paths for error message
+        // WHY: Server wraps Google API errors, creating multiple nesting levels
+        if (errorData.message) {
+          // Top-level message (easiest to extract)
+          errorMessage = errorData.message;
+        } else if (errorData.error?.error?.message) {
+          // Deeply nested: {error: {error: {message: "..."}}}
+          errorMessage = errorData.error.error.message;
+        } else if (errorData.error?.message) {
+          // Standard nested: {error: {message: "..."}}
+          errorMessage = errorData.error.message;
+        } else if (errorData.details) {
+          errorMessage = typeof errorData.details === 'string' ? errorData.details : JSON.stringify(errorData.details);
+        } else if (errorData.error) {
+          if (typeof errorData.error === 'string') {
+            errorMessage = errorData.error;
+          } else if (errorData.error.message) {
+            errorMessage = errorData.error.message;
+          } else {
+            errorMessage = JSON.stringify(errorData.error);
+          }
+        }
+        throw new Error(errorMessage);
       }
 
       const updatedDevices = await response.json();
@@ -335,7 +406,11 @@ function App() {
       );
     } catch (error) {
       console.error('Error updating temperature:', error);
-      alert(`Failed to update temperature: ${error.message}`);
+      // FIX: Ensure error message is always a string, not an object
+      // CHANGE: Safely extract error message from error object
+      // WHY: Prevents "[object Object]" from appearing in alerts
+      const errorMessage = error instanceof Error ? error.message : (typeof error === 'string' ? error : JSON.stringify(error));
+      alert(`Failed to update temperature: ${errorMessage}`);
     } finally {
       setUpdatingTemp(null);
     }
@@ -376,15 +451,49 @@ function App() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.details || errorData.error || 'Failed to update temperature');
+        const errorData = await response.json().catch(() => ({}));
+        // FIX: Handle case where error.error or error.details might be objects
+        // CHANGE: Safely extract error message, handling objects and strings
+        // WHY: Server may return error objects that need to be stringified properly
+        let errorMessage = 'Failed to update temperature';
+        // FIX: Prioritize error.message over other fields for Google API errors
+        // CHANGE: Check error.message first, then details, then nested error object
+        // WHY: Google API often puts the actual error in error.message field
+        // FIX: Handle nested error structure - errorData.error.error.message
+        // CHANGE: Check all possible nested paths for error message
+        // WHY: Server wraps Google API errors, creating multiple nesting levels
+        if (errorData.message) {
+          // Top-level message (easiest to extract)
+          errorMessage = errorData.message;
+        } else if (errorData.error?.error?.message) {
+          // Deeply nested: {error: {error: {message: "..."}}}
+          errorMessage = errorData.error.error.message;
+        } else if (errorData.error?.message) {
+          // Standard nested: {error: {message: "..."}}
+          errorMessage = errorData.error.message;
+        } else if (errorData.details) {
+          errorMessage = typeof errorData.details === 'string' ? errorData.details : JSON.stringify(errorData.details);
+        } else if (errorData.error) {
+          if (typeof errorData.error === 'string') {
+            errorMessage = errorData.error;
+          } else if (errorData.error.message) {
+            errorMessage = errorData.error.message;
+          } else {
+            errorMessage = JSON.stringify(errorData.error);
+          }
+        }
+        throw new Error(errorMessage);
       }
 
       // Fetch updated device list to ensure all data is in sync
       await fetchDevices();
     } catch (error) {
       console.error('Error updating temperature:', error);
-      alert(`Failed to update temperature: ${error.message}`);
+      // FIX: Ensure error message is always a string, not an object
+      // CHANGE: Safely extract error message from error object
+      // WHY: Prevents "[object Object]" from appearing in alerts
+      const errorMessage = error instanceof Error ? error.message : (typeof error === 'string' ? error : JSON.stringify(error));
+      alert(`Failed to update temperature: ${errorMessage}`);
     }
   };
 
@@ -686,21 +795,48 @@ function App() {
                             alert('Cannot adjust temperature while in ECO mode. Please change to HEAT or COOL mode first.');
                             return;
                           }
-                          // VALIDATION: Check if targetTemp is a valid number
-                          if (typeof device.targetTemp !== 'number' || isNaN(device.targetTemp)) {
-                            alert('Cannot adjust temperature: Invalid target temperature value');
-                            return;
+                          // VALIDATION: For HEATCOOL mode, check setpoints instead of targetTemp
+                          // FIX: In HEATCOOL mode, targetTemp is a string, so validate setpoints instead
+                          // CHANGE: Check heatSetpoint/coolSetpoint for HEATCOOL mode, targetTemp for other modes
+                          // WHY: HEATCOOL mode uses string targetTemp like "13.5°C - 24°C"
+                          if (device.mode === 'HEATCOOL' || device.mode === 'AUTO') {
+                            // For HEATCOOL, we need to determine which setpoint to adjust
+                            // Default to heat setpoint if available, otherwise cool
+                            const setpoint = typeof device.heatSetpoint === 'number' 
+                              ? device.heatSetpoint 
+                              : (typeof device.coolSetpoint === 'number' ? device.coolSetpoint : null);
+                            if (setpoint === null || isNaN(setpoint)) {
+                              alert('Cannot adjust temperature: Invalid setpoint values');
+                              return;
+                            }
+                            handleTempChange(device, setpoint - tempIncrement);
+                          } else {
+                            // For other modes, check targetTemp
+                            if (typeof device.targetTemp !== 'number' || isNaN(device.targetTemp)) {
+                              alert('Cannot adjust temperature: Invalid target temperature value');
+                              return;
+                            }
+                            handleTempChange(device, device.targetTemp - tempIncrement);
                           }
-                          handleTempChange(device, device.targetTemp - tempIncrement);
                         }}
                         // ECO MODE DISABLING: Disable temperature controls when in ECO mode
                         // ECO mode uses preset temperature ranges and doesn't allow manual adjustment
-                        disabled={updatingTemp === device.id || (device.mode && device.mode.startsWith('ECO')) || (typeof device.targetTemp !== 'number')}
+                        // FIX: In HEATCOOL mode, targetTemp is a string, so check heatSetpoint/coolSetpoint instead
+                        // CHANGE: Allow buttons if targetTemp is number OR if device has valid setpoints in HEATCOOL mode
+                        // WHY: HEATCOOL mode uses string targetTemp like "13.5°C - 24°C", but buttons should still work
+                        disabled={updatingTemp === device.id || 
+                                 (device.mode && device.mode.startsWith('ECO')) || 
+                                 ((typeof device.targetTemp !== 'number') && 
+                                  !(device.mode === 'HEATCOOL' || device.mode === 'AUTO') && 
+                                  !(typeof device.heatSetpoint === 'number' || typeof device.coolSetpoint === 'number'))}
                         className={`
                           px-3 py-1 rounded-lg font-semibold
                           ${updatingTemp === device.id 
                             ? 'bg-gray-300 cursor-not-allowed'
-                            : (device.mode && device.mode.startsWith('ECO')) || (typeof device.targetTemp !== 'number')
+                            : (device.mode && device.mode.startsWith('ECO')) || 
+                              ((typeof device.targetTemp !== 'number') && 
+                               !(device.mode === 'HEATCOOL' || device.mode === 'AUTO') && 
+                               !(typeof device.heatSetpoint === 'number' || typeof device.coolSetpoint === 'number'))
                               ? 'bg-gray-300 cursor-not-allowed'
                               : 'bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white'
                           }
@@ -730,21 +866,48 @@ function App() {
                             alert('Cannot adjust temperature while in ECO mode. Please change to HEAT or COOL mode first.');
                             return;
                           }
-                          // VALIDATION: Check if targetTemp is a valid number
-                          if (typeof device.targetTemp !== 'number' || isNaN(device.targetTemp)) {
-                            alert('Cannot adjust temperature: Invalid target temperature value');
-                            return;
+                          // VALIDATION: For HEATCOOL mode, check setpoints instead of targetTemp
+                          // FIX: In HEATCOOL mode, targetTemp is a string, so validate setpoints instead
+                          // CHANGE: Check heatSetpoint/coolSetpoint for HEATCOOL mode, targetTemp for other modes
+                          // WHY: HEATCOOL mode uses string targetTemp like "13.5°C - 24°C"
+                          if (device.mode === 'HEATCOOL' || device.mode === 'AUTO') {
+                            // For HEATCOOL, we need to determine which setpoint to adjust
+                            // Default to heat setpoint if available, otherwise cool
+                            const setpoint = typeof device.heatSetpoint === 'number' 
+                              ? device.heatSetpoint 
+                              : (typeof device.coolSetpoint === 'number' ? device.coolSetpoint : null);
+                            if (setpoint === null || isNaN(setpoint)) {
+                              alert('Cannot adjust temperature: Invalid setpoint values');
+                              return;
+                            }
+                            handleTempChange(device, setpoint + tempIncrement);
+                          } else {
+                            // For other modes, check targetTemp
+                            if (typeof device.targetTemp !== 'number' || isNaN(device.targetTemp)) {
+                              alert('Cannot adjust temperature: Invalid target temperature value');
+                              return;
+                            }
+                            handleTempChange(device, device.targetTemp + tempIncrement);
                           }
-                          handleTempChange(device, device.targetTemp + tempIncrement);
                         }}
                         // ECO MODE DISABLING: Disable temperature controls when in ECO mode
                         // ECO mode uses preset temperature ranges and doesn't allow manual adjustment
-                        disabled={updatingTemp === device.id || (device.mode && device.mode.startsWith('ECO')) || (typeof device.targetTemp !== 'number')}
+                        // FIX: In HEATCOOL mode, targetTemp is a string, so check heatSetpoint/coolSetpoint instead
+                        // CHANGE: Allow buttons if targetTemp is number OR if device has valid setpoints in HEATCOOL mode
+                        // WHY: HEATCOOL mode uses string targetTemp like "13.5°C - 24°C", but buttons should still work
+                        disabled={updatingTemp === device.id || 
+                                 (device.mode && device.mode.startsWith('ECO')) || 
+                                 ((typeof device.targetTemp !== 'number') && 
+                                  !(device.mode === 'HEATCOOL' || device.mode === 'AUTO') && 
+                                  !(typeof device.heatSetpoint === 'number' || typeof device.coolSetpoint === 'number'))}
                         className={`
                           px-3 py-1 rounded-lg font-semibold
                           ${updatingTemp === device.id 
                             ? 'bg-gray-300 cursor-not-allowed'
-                            : (device.mode && device.mode.startsWith('ECO')) || (typeof device.targetTemp !== 'number')
+                            : (device.mode && device.mode.startsWith('ECO')) || 
+                              ((typeof device.targetTemp !== 'number') && 
+                               !(device.mode === 'HEATCOOL' || device.mode === 'AUTO') && 
+                               !(typeof device.heatSetpoint === 'number' || typeof device.coolSetpoint === 'number'))
                               ? 'bg-gray-300 cursor-not-allowed'
                               : 'bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white'
                           }

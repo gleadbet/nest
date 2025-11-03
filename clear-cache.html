@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Clear Cache and Reload</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        button { padding: 10px 20px; margin: 10px; font-size: 16px; }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>Clear Cache and Reload Application</h1>
+    <p>This page will help you clear your browser cache and reload the application with the latest version.</p>
+    
+    <button onclick="clearCache()">Clear Cache and Reload</button>
+    <button onclick="hardReload()">Hard Reload (Ctrl+Shift+R)</button>
+    
+    <div id="status"></div>
+    
+    <script>
+        function clearCache() {
+            const status = document.getElementById('status');
+            status.innerHTML = '<p class="success">Clearing cache...</p>';
+            
+            // Clear various types of cache
+            if ('caches' in window) {
+                caches.keys().then(function(names) {
+                    for (let name of names) {
+                        caches.delete(name);
+                    }
+                    status.innerHTML += '<p class="success">Service worker cache cleared</p>';
+                });
+            }
+            
+            // Clear localStorage and sessionStorage
+            localStorage.clear();
+            sessionStorage.clear();
+            status.innerHTML += '<p class="success">Local storage cleared</p>';
+            
+            // Clear cookies for this domain
+            document.cookie.split(";").forEach(function(c) { 
+                document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/"); 
+            });
+            status.innerHTML += '<p class="success">Cookies cleared</p>';
+            
+            // Reload after a short delay
+            setTimeout(() => {
+                status.innerHTML += '<p class="success">Reloading application...</p>';
+                window.location.href = 'http://localhost:3000';
+            }, 1000);
+        }
+        
+        function hardReload() {
+            const status = document.getElementById('status');
+            status.innerHTML = '<p class="success">Performing hard reload...</p>';
+            
+            // Force reload without cache
+            window.location.reload(true);
+        }
+        
+        // Auto-clear cache on page load
+        window.addEventListener('load', function() {
+            if ('caches' in window) {
+                caches.keys().then(function(names) {
+                    for (let name of names) {
+                        caches.delete(name);
+                    }
+                });
+            }
+        });
+    </script>
+</body>
+</html> 

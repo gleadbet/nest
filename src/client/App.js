@@ -85,14 +85,19 @@ function App() {
       
       // Add timeout to fetch request
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout (increased from 15s)
+      const timeoutId = setTimeout(() => {
+        console.error('Frontend timeout triggered after 30 seconds');
+        controller.abort();
+      }, 30000); // 30 second timeout (increased from 15s)
       
+      console.log('Making fetch request to /api/devices...');
       const response = await fetch('/api/devices', {
         credentials: 'include',
         signal: controller.signal
       });
       
       clearTimeout(timeoutId);
+      console.log('Fetch request completed, clearing timeout');
       
       const endTime = Date.now();
       console.log('Response received after:', endTime - startTime, 'ms');
@@ -254,8 +259,14 @@ function App() {
   };
 
   // Get mode from device traits
+  // CHANGE: Format HEATCOOL and AUTO modes for better display
+  // WHY: 'HEATCOOL' is technical; 'Heat/Cool' is more user-friendly
   const getMode = (device) => {
-    return device?.mode || 'Unknown';
+    if (!device?.mode) return 'Unknown';
+    // Format mode for display
+    if (device.mode === 'HEATCOOL') return 'Heat/Cool';
+    if (device.mode === 'AUTO') return 'Auto';
+    return device.mode;
   };
 
   // Get humidity from device traits
@@ -378,26 +389,61 @@ function App() {
   };
 
   // Get the current run status based on mode and temperatures
+  // FIX: Previously returned 'Unknown' for HEATCOOL mode because targetTemp is a string
+  // CHANGE: Prioritize using device.status from API (most accurate), then fallback to calculation
+  // WHY: The API now provides accurate status from HVAC trait. Using it directly is more reliable
+  //      than trying to parse string targetTemp values in HEATCOOL mode
+  // First try to use the status from the API (which comes from HVAC trait)
   const getRunStatus = (device) => {
+    // Use status from API if available (this is the most accurate)
+    // This status comes from the ThermostatHvac trait and reflects actual HVAC state
+    if (device.status) {
+      // Map API status values to display values
+      if (device.status === 'IDLE') return 'Idle';
+      if (device.status === 'HEATING') return 'Heating';
+      if (device.status === 'COOLING') return 'Cooling';
+      if (device.status === 'OFF') return 'Idle';
+      // Return status as-is if it's already in a displayable format
+      return device.status;
+    }
+    
+    // Fallback: Calculate status based on mode and temperatures (legacy logic)
     // Check if device is in ECO mode (either "ECO" or "ECO (HEAT/COOL)")
-    // This handles the backend's ECO mode format which includes the base mode
     const isEcoMode = device.mode && device.mode.startsWith('ECO');
     
     if (device.mode === 'OFF' || isEcoMode) {
       return 'Off';
     }
     
-    const currentTemp = parseFloat(device.currentTemp);
-    const targetTemp = parseFloat(device.targetTemp);
+    // For HEATCOOL mode, targetTemp is a string like "20.6°C - 23.9°C"
+    // Try to extract numeric values if needed
+    let currentTemp = parseFloat(device.currentTemp);
+    let targetTemp = null;
     
-    if (isNaN(currentTemp) || isNaN(targetTemp)) {
-      return 'Unknown';
-    }
+    if (typeof device.targetTemp === 'string' && device.targetTemp.includes('°C')) {
+      // For HEATCOOL mode with string targetTemp, we can't easily determine status
+      // So use the heat/cool setpoints if available
+      if (device.heatSetpoint !== undefined && device.coolSetpoint !== undefined) {
+        if (currentTemp < device.heatSetpoint) {
+          return 'Heating';
+        } else if (currentTemp > device.coolSetpoint) {
+          return 'Cooling';
+        } else {
+          return 'Idle';
+        }
+      }
+      return 'Idle'; // Default to Idle for HEATCOOL when temp is in range
+    } else {
+      targetTemp = parseFloat(device.targetTemp);
+      if (isNaN(currentTemp) || isNaN(targetTemp)) {
+        return 'Unknown';
+      }
 
-    if (device.mode === 'HEAT') {
-      return currentTemp < targetTemp ? 'Heating' : 'Idle';
-    } else if (device.mode === 'COOL') {
-      return currentTemp > targetTemp ? 'Cooling' : 'Idle';
+      if (device.mode === 'HEAT') {
+        return currentTemp < targetTemp ? 'Heating' : 'Idle';
+      } else if (device.mode === 'COOL') {
+        return currentTemp > targetTemp ? 'Cooling' : 'Idle';
+      }
     }
     
     return 'Unknown';
@@ -730,6 +776,8 @@ function App() {
                     >
                       <option value="HEAT">HEAT</option>
                       <option value="COOL">COOL</option>
+                      <option value="HEATCOOL">Heat/Cool</option>
+                      <option value="AUTO">AUTO</option>
                       <option value="ECO">ECO</option>
                       <option value="OFF">OFF</option>
                     </select>

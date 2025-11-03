@@ -52,6 +52,9 @@ interface DeviceTableProps {
  * - Reconnects WebSocket when token is refreshed
  */
 export default function DeviceTable({ deviceId, refreshInterval = 60000, setpointIncrement = 0.5 }: DeviceTableProps) {
+  // Entry logging
+  console.log('TemperatureDial - Component mounting/rendering:', { deviceId, refreshInterval, setpointIncrement });
+  
   // useSession hook automatically handles:
   // - Initial session loading
   // - Token refresh when expired
@@ -64,6 +67,16 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
   const [isEditingName, setIsEditingName] = useState(false);
   const [customName, setCustomName] = useState('');
   const [currentRefreshInterval, setCurrentRefreshInterval] = useState(refreshInterval);
+  
+  // Log session state
+  useEffect(() => {
+    console.log('TemperatureDial - Session state:', {
+      deviceId,
+      hasSession: !!session,
+      hasAccessToken: !!session?.accessToken,
+      sessionPreview: session?.accessToken?.substring(0, 20) + '...'
+    });
+  }, [session, deviceId]);
   
   // Refs for managing state and preventing memory leaks
   const socketRef = useRef<any>(null);
@@ -123,15 +136,50 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
 
       socket.on(`device-${deviceId}-update`, (data: any) => {
         if (data?.traits && isMountedRef.current) {
+          const setpointTrait = data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint'] || {};
+          const currentMode = data.traits['sdm.devices.traits.ThermostatMode']?.mode;
+          
+          // Extract setpoints - handle numbers, strings, and undefined/null
+          let heatSetpoint: number | undefined = undefined;
+          let coolSetpoint: number | undefined = undefined;
+          
+          // Handle heatCelsius
+          if (setpointTrait.heatCelsius !== undefined && setpointTrait.heatCelsius !== null) {
+            const rawValue = setpointTrait.heatCelsius;
+            // Skip if it's the string "N/A"
+            if (typeof rawValue === 'string' && rawValue === 'N/A') {
+              heatSetpoint = undefined;
+            } else {
+              const value = Number(rawValue);
+              if (!isNaN(value) && isFinite(value)) {
+                heatSetpoint = value;
+              }
+            }
+          }
+          
+          // Handle coolCelsius
+          if (setpointTrait.coolCelsius !== undefined && setpointTrait.coolCelsius !== null) {
+            const rawValue = setpointTrait.coolCelsius;
+            // Skip if it's the string "N/A"
+            if (typeof rawValue === 'string' && rawValue === 'N/A') {
+              coolSetpoint = undefined;
+            } else {
+              const value = Number(rawValue);
+              if (!isNaN(value) && isFinite(value)) {
+                coolSetpoint = value;
+              }
+            }
+          }
+
           const deviceInfo: DeviceData = {
-            name: customNameRef.current || data.traits['sdm.devices.traits.Info']?.modelName || 'Device ' + deviceId,
+            name: customNameRef.current || data.traits['sdm.devices.traits.Info']?.modelName || data.traits['sdm.devices.traits.Info']?.customName || 'Device ' + deviceId,
             temperature: data.traits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius ?? 0,
             humidity: data.traits['sdm.devices.traits.Humidity']?.ambientHumidityPercent,
             lastUpdate: new Date().toLocaleTimeString(),
-            mode: data.traits['sdm.devices.traits.ThermostatMode']?.mode,
+            mode: currentMode,
             hvacStatus: data.traits['sdm.devices.traits.ThermostatHvac']?.status,
-            heatSetpoint: data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius,
-            coolSetpoint: data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius
+            heatSetpoint: heatSetpoint,
+            coolSetpoint: coolSetpoint
           };
           setDeviceData(deviceInfo);
         }
@@ -156,31 +204,114 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
    * - New requests use the refreshed token automatically
    */
   const fetchDeviceData = useRef(async () => {
-    if (!session?.accessToken || !isMountedRef.current) return;
+    console.log('TemperatureDial - fetchDeviceData called:', {
+      deviceId,
+      hasSession: !!session,
+      hasAccessToken: !!session?.accessToken,
+      isMounted: isMountedRef.current
+    });
+    
+    if (!deviceId) {
+      console.error('TemperatureDial - No deviceId provided');
+      return;
+    }
+    
+    if (!session?.accessToken) {
+      console.warn('TemperatureDial - No access token, skipping fetch');
+      return;
+    }
+    
+    if (!isMountedRef.current) {
+      console.warn('TemperatureDial - Component not mounted, skipping fetch');
+      return;
+    }
 
     try {
       const now = Date.now();
-      if (now - lastFetchTimeRef.current < 1000) return; // Prevent rapid refetches
+      if (now - lastFetchTimeRef.current < 1000) {
+        console.log('TemperatureDial - Skipping fetch, too recent');
+        return; // Prevent rapid refetches
+      }
       lastFetchTimeRef.current = now;
 
+      console.log('TemperatureDial - Fetching device data from:', `/api/devices/${deviceId}`);
       const response = await fetch(`/api/devices/${deviceId}`, {
         headers: {
           'Authorization': `Bearer ${session.accessToken}`
         }
       });
+      
+      console.log('TemperatureDial - API response status:', response.status, response.statusText);
 
       if (response.ok) {
         const data = await response.json();
+        console.log('TemperatureDial - Raw API response:', JSON.stringify(data, null, 2));
+        
         if (data?.traits && isMountedRef.current) {
+          const setpointTrait = data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint'] || {};
+          const currentMode = data.traits['sdm.devices.traits.ThermostatMode']?.mode;
+          const currentTemp = data.traits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius ?? 0;
+          
+          // Extract setpoints - handle numbers, strings, and undefined/null
+          let heatSetpoint: number | undefined = undefined;
+          let coolSetpoint: number | undefined = undefined;
+          
+          // Handle heatCelsius
+          if (setpointTrait.heatCelsius !== undefined && setpointTrait.heatCelsius !== null) {
+            const rawValue = setpointTrait.heatCelsius;
+            // Skip if it's the string "N/A"
+            if (typeof rawValue === 'string' && rawValue === 'N/A') {
+              heatSetpoint = undefined;
+            } else {
+              const value = Number(rawValue);
+              if (!isNaN(value) && isFinite(value)) {
+                heatSetpoint = value;
+              }
+            }
+          }
+          
+          // Handle coolCelsius
+          if (setpointTrait.coolCelsius !== undefined && setpointTrait.coolCelsius !== null) {
+            const rawValue = setpointTrait.coolCelsius;
+            // Skip if it's the string "N/A"
+            if (typeof rawValue === 'string' && rawValue === 'N/A') {
+              coolSetpoint = undefined;
+            } else {
+              const value = Number(rawValue);
+              if (!isNaN(value) && isFinite(value)) {
+                coolSetpoint = value;
+              }
+            }
+          }
+
+          // Debug logging - comprehensive
+          console.log('TemperatureDial - Full data extraction:', {
+            deviceId,
+            mode: currentMode,
+            heatSetpoint,
+            coolSetpoint,
+            heatSetpointType: typeof heatSetpoint,
+            coolSetpointType: typeof coolSetpoint,
+            setpointTraitExists: !!setpointTrait,
+            setpointTraitKeys: Object.keys(setpointTrait),
+            heatCelsiusRaw: setpointTrait.heatCelsius,
+            heatCelsiusType: typeof setpointTrait.heatCelsius,
+            coolCelsiusRaw: setpointTrait.coolCelsius,
+            coolCelsiusType: typeof setpointTrait.coolCelsius,
+            setpointTraitRaw: setpointTrait,
+            currentTemp,
+            allTraitsKeys: Object.keys(data.traits || {})
+          });
+
           const deviceInfo: DeviceData = {
-            name: customNameRef.current || data.traits['sdm.devices.traits.Info']?.modelName || 'Device ' + deviceId,
-            temperature: data.traits['sdm.devices.traits.Temperature']?.ambientTemperatureCelsius ?? 0,
+            name: customNameRef.current || data.traits['sdm.devices.traits.Info']?.modelName || data.traits['sdm.devices.traits.Info']?.customName || 'Device ' + deviceId,
+            temperature: currentTemp,
             humidity: data.traits['sdm.devices.traits.Humidity']?.ambientHumidityPercent,
             lastUpdate: new Date().toLocaleTimeString(),
-            mode: data.traits['sdm.devices.traits.ThermostatMode']?.mode,
+            mode: currentMode,
             hvacStatus: data.traits['sdm.devices.traits.ThermostatHvac']?.status,
-            heatSetpoint: data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius,
-            coolSetpoint: data.traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius
+            heatSetpoint: heatSetpoint,
+            coolSetpoint: coolSetpoint
           };
           setDeviceData(deviceInfo);
           retryCountRef.current = 0;
@@ -224,6 +355,19 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
    * - Existing connections are properly cleaned up
    */
   useEffect(() => {
+    console.log('TemperatureDial - useEffect lifecycle:', {
+      deviceId,
+      currentRefreshInterval,
+      hasAccessToken: !!session?.accessToken,
+      isMounted: isMountedRef.current
+    });
+    
+    if (!deviceId) {
+      console.error('TemperatureDial - Cannot initialize: no deviceId');
+      setIsLoading(false);
+      return;
+    }
+    
     isMountedRef.current = true;
     setIsLoading(true);
 
@@ -241,6 +385,7 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
     }, currentRefreshInterval);
 
     return () => {
+      console.log('TemperatureDial - Cleaning up:', { deviceId });
       isMountedRef.current = false;
       clearInterval(interval);
       if (socketRef.current?.connected) {
@@ -659,12 +804,17 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
             <tr>
               <td className="py-1 text-gray-600">Mode:</td>
               <td className="py-1 font-medium">
+                {/* CHANGE: Added HEATCOOL/AUTO mode styling and display formatting */}
+                {/* WHY: HEATCOOL mode needs visual distinction and user-friendly 'Heat/Cool' label */}
                 <span className={`px-2 py-1 rounded text-sm ${
                   deviceData.mode === 'HEAT' ? 'bg-red-100 text-red-800' :
                   deviceData.mode === 'COOL' ? 'bg-blue-100 text-blue-800' :
+                  deviceData.mode === 'HEATCOOL' || deviceData.mode === 'AUTO' ? 'bg-purple-100 text-purple-800' :
                   'bg-gray-100 text-gray-800'
                 }`}>
-                  {deviceData.mode}
+                  {deviceData.mode === 'HEATCOOL' ? 'Heat/Cool' : 
+                   deviceData.mode === 'AUTO' ? 'Auto' :
+                   deviceData.mode}
                 </span>
               </td>
             </tr>
@@ -683,85 +833,139 @@ export default function DeviceTable({ deviceId, refreshInterval = 60000, setpoin
               </td>
             </tr>
           )}
-          {/* Heat Setpoint Control */}
-          {deviceData.heatSetpoint !== undefined && (
+          {/* Heat Setpoint Control - Show if mode is HEAT, HEATCOOL, or AUTO, or if heatSetpoint exists */}
+          {((deviceData.mode === 'HEAT' || deviceData.mode === 'HEATCOOL' || deviceData.mode === 'AUTO') || 
+            (deviceData.heatSetpoint !== undefined && deviceData.heatSetpoint !== null && !isNaN(deviceData.heatSetpoint))) && (
             <tr>
               <td className="py-1 text-gray-600">Heat Setpoint:</td>
               <td className="py-1 font-medium">
-                <div className="flex flex-col gap-1">
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => adjustSetpoint('heat', deviceData.heatSetpoint! - (setpointIncrement || 0.5))}
-                      disabled={pendingSetpoint !== null}
-                      className={`px-2 py-1 rounded transition-colors ${
-                        pendingSetpoint?.type === 'heat'
-                          ? 'bg-red-200 text-red-900 cursor-not-allowed'
-                          : pendingSetpoint
-                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                            : 'bg-red-100 text-red-800 hover:bg-red-200'
-                      }`}
-                    >
-                      {pendingSetpoint?.type === 'heat' ? '...' : '-'}
-                    </button>
-                    <span className="w-16 text-center">
-                      {deviceData.heatSetpoint.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.heatSetpoint).toFixed(1)}°F
-                    </span>
-                    <button
-                      onClick={() => adjustSetpoint('heat', deviceData.heatSetpoint! + (setpointIncrement || 0.5))}
-                      disabled={pendingSetpoint !== null}
-                      className={`px-2 py-1 rounded transition-colors ${
-                        pendingSetpoint?.type === 'heat'
-                          ? 'bg-red-200 text-red-900 cursor-not-allowed'
-                          : pendingSetpoint
-                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                            : 'bg-red-100 text-red-800 hover:bg-red-200'
-                      }`}
-                    >
-                      {pendingSetpoint?.type === 'heat' ? '...' : '+'}
-                    </button>
+                {deviceData.heatSetpoint !== undefined && deviceData.heatSetpoint !== null && !isNaN(deviceData.heatSetpoint) ? (
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => adjustSetpoint('heat', deviceData.heatSetpoint! - (setpointIncrement || 0.5))}
+                        disabled={pendingSetpoint !== null}
+                        className={`px-2 py-1 rounded transition-colors ${
+                          pendingSetpoint?.type === 'heat'
+                            ? 'bg-red-200 text-red-900 cursor-not-allowed'
+                            : pendingSetpoint
+                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                              : 'bg-red-100 text-red-800 hover:bg-red-200'
+                        }`}
+                      >
+                        {pendingSetpoint?.type === 'heat' ? '...' : '-'}
+                      </button>
+                      <span className="w-16 text-center">
+                        {deviceData.heatSetpoint.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.heatSetpoint).toFixed(1)}°F
+                      </span>
+                      <button
+                        onClick={() => adjustSetpoint('heat', deviceData.heatSetpoint! + (setpointIncrement || 0.5))}
+                        disabled={pendingSetpoint !== null}
+                        className={`px-2 py-1 rounded transition-colors ${
+                          pendingSetpoint?.type === 'heat'
+                            ? 'bg-red-200 text-red-900 cursor-not-allowed'
+                            : pendingSetpoint
+                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                              : 'bg-red-100 text-red-800 hover:bg-red-200'
+                        }`}
+                      >
+                        {pendingSetpoint?.type === 'heat' ? '...' : '+'}
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2 text-sm text-gray-600">
+                      <span>Increment: {(setpointIncrement || 0.5).toFixed(1)}°</span>
+                      {setpointStatus && (pendingSetpoint?.type === 'heat' || adjustingSetpoint === 'heat') && (
+                        <span className="italic">{setpointStatus}</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2 text-sm text-gray-600">
-                    <span>Increment: {(setpointIncrement || 0.5).toFixed(1)}°</span>
+                ) : (
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => adjustSetpoint('heat', Math.round(deviceData.temperature))}
+                        disabled={pendingSetpoint !== null}
+                        className="px-2 py-1 rounded bg-red-100 text-red-800 hover:bg-red-200 disabled:bg-gray-100 disabled:text-gray-400"
+                      >
+                        Set
+                      </button>
+                      <span className="text-sm text-gray-500 italic">
+                        Not set (Current: {deviceData.temperature.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.temperature).toFixed(1)}°F)
+                      </span>
+                    </div>
                     {setpointStatus && (pendingSetpoint?.type === 'heat' || adjustingSetpoint === 'heat') && (
-                      <span className="italic">{setpointStatus}</span>
+                      <span className="text-sm italic text-gray-600">{setpointStatus}</span>
                     )}
                   </div>
-                </div>
+                )}
               </td>
             </tr>
           )}
-          {/* Cool Setpoint Control */}
-          {deviceData.coolSetpoint !== undefined && (
+          {/* Cool Setpoint Control - Show if mode is COOL, HEATCOOL, or AUTO, or if coolSetpoint exists */}
+          {((deviceData.mode === 'COOL' || deviceData.mode === 'HEATCOOL' || deviceData.mode === 'AUTO') || 
+            (deviceData.coolSetpoint !== undefined && deviceData.coolSetpoint !== null && !isNaN(deviceData.coolSetpoint))) && (
             <tr>
               <td className="py-1 text-gray-600">Cool Setpoint:</td>
               <td className="py-1 font-medium">
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => adjustSetpoint('cool', deviceData.coolSetpoint! - 0.5)}
-                    disabled={adjustingSetpoint === 'cool'}
-                    className={`px-2 py-1 rounded transition-colors ${
-                      adjustingSetpoint === 'cool'
-                        ? 'bg-blue-200 text-blue-900 cursor-not-allowed'
-                        : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
-                    }`}
-                  >
-                    {adjustingSetpoint === 'cool' ? '...' : '-'}
-                  </button>
-                  <span className="w-16 text-center">
-                    {deviceData.coolSetpoint.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.coolSetpoint).toFixed(1)}°F
-                  </span>
-                  <button
-                    onClick={() => adjustSetpoint('cool', deviceData.coolSetpoint! + 0.5)}
-                    disabled={adjustingSetpoint === 'cool'}
-                    className={`px-2 py-1 rounded transition-colors ${
-                      adjustingSetpoint === 'cool'
-                        ? 'bg-blue-200 text-blue-900 cursor-not-allowed'
-                        : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
-                    }`}
-                  >
-                    {adjustingSetpoint === 'cool' ? '...' : '+'}
-                  </button>
-                </div>
+                {deviceData.coolSetpoint !== undefined && deviceData.coolSetpoint !== null && !isNaN(deviceData.coolSetpoint) ? (
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => adjustSetpoint('cool', deviceData.coolSetpoint! - (setpointIncrement || 0.5))}
+                        disabled={pendingSetpoint !== null}
+                        className={`px-2 py-1 rounded transition-colors ${
+                          pendingSetpoint?.type === 'cool'
+                            ? 'bg-blue-200 text-blue-900 cursor-not-allowed'
+                            : pendingSetpoint
+                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                              : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
+                        }`}
+                      >
+                        {pendingSetpoint?.type === 'cool' ? '...' : '-'}
+                      </button>
+                      <span className="w-16 text-center">
+                        {deviceData.coolSetpoint.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.coolSetpoint).toFixed(1)}°F
+                      </span>
+                      <button
+                        onClick={() => adjustSetpoint('cool', deviceData.coolSetpoint! + (setpointIncrement || 0.5))}
+                        disabled={pendingSetpoint !== null}
+                        className={`px-2 py-1 rounded transition-colors ${
+                          pendingSetpoint?.type === 'cool'
+                            ? 'bg-blue-200 text-blue-900 cursor-not-allowed'
+                            : pendingSetpoint
+                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                              : 'bg-blue-100 text-blue-800 hover:bg-blue-200'
+                        }`}
+                      >
+                        {pendingSetpoint?.type === 'cool' ? '...' : '+'}
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2 text-sm text-gray-600">
+                      <span>Increment: {(setpointIncrement || 0.5).toFixed(1)}°</span>
+                      {setpointStatus && (pendingSetpoint?.type === 'cool' || adjustingSetpoint === 'cool') && (
+                        <span className="italic">{setpointStatus}</span>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => adjustSetpoint('cool', Math.round(deviceData.temperature))}
+                        disabled={pendingSetpoint !== null}
+                        className="px-2 py-1 rounded bg-blue-100 text-blue-800 hover:bg-blue-200 disabled:bg-gray-100 disabled:text-gray-400"
+                      >
+                        Set
+                      </button>
+                      <span className="text-sm text-gray-500 italic">
+                        Not set (Current: {deviceData.temperature.toFixed(1)}°C / {celsiusToFahrenheit(deviceData.temperature).toFixed(1)}°F)
+                      </span>
+                    </div>
+                    {setpointStatus && (pendingSetpoint?.type === 'cool' || adjustingSetpoint === 'cool') && (
+                      <span className="text-sm italic text-gray-600">{setpointStatus}</span>
+                    )}
+                  </div>
+                )}
               </td>
             </tr>
           )}

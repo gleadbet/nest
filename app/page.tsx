@@ -163,7 +163,22 @@ export default function Home() {
       
       {/* Device grid - 1 column on mobile, 2 columns on desktop */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {devices.map((device) => (
+        {devices.map((device) => {
+          const deviceId = device.name.split('/').pop() || '';
+          console.log('Home page - Rendering device:', {
+            deviceName: device.name,
+            extractedDeviceId: deviceId,
+            deviceType: device.type,
+            hasTraits: !!device.traits
+          });
+          
+          if (!deviceId) {
+            console.error('Home page - Invalid deviceId for device:', device);
+            return null;
+            
+          }
+          
+          return (
           <div key={device.name} className="bg-white rounded-lg shadow">
             {/* Device header with name */}
             <h2 className="text-xl font-semibold p-4 border-b">
@@ -174,7 +189,7 @@ export default function Home() {
             <div>
               {/* Temperature dial component - always shown */}
               <TemperatureDial 
-                deviceId={device.name.split('/').pop() || ''} 
+                deviceId={deviceId} 
                 refreshInterval={30000} // 30 seconds refresh
               />
               
@@ -182,14 +197,15 @@ export default function Home() {
               {device.traits['sdm.devices.traits.Temperature'] && (
                 <div className="border-t">
                   <TemperatureGraph 
-                    deviceId={device.name.split('/').pop() || ''} 
+                    deviceId={deviceId} 
                     refreshInterval={300000} // 5 minutes refresh
                   />
                 </div>
               )}
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
       
       {/* Global refresh button */}

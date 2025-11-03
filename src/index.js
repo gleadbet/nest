@@ -491,25 +491,57 @@ try {
           const mode = isEcoMode ? `ECO (${baseMode})` : baseMode;
 
           // Get target temperature based on mode
+          // FIX: Previously HEATCOOL mode was not handled, causing targetTemp to show 'N/A'
+          // CHANGE: Added explicit HEATCOOL/AUTO mode handling to extract both heat and cool setpoints
+          // WHY: In HEATCOOL mode, Google Nest devices have separate heatCelsius and coolCelsius values
+          //      that both need to be displayed (e.g., "20.6°C - 23.9°C")
           let targetTemp = 'N/A';
+          const setpointTrait = traits['sdm.devices.traits.ThermostatTemperatureSetpoint'] || {};
+          const heatSetpoint = setpointTrait.heatCelsius;
+          const coolSetpoint = setpointTrait.coolCelsius;
+          
           if (isEcoMode) {
             const heatTemp = typeof ecoTrait.heatCelsius === 'number' ? Number(ecoTrait.heatCelsius.toFixed(1)) : 'N/A';
             const coolTemp = typeof ecoTrait.coolCelsius === 'number' ? Number(ecoTrait.coolCelsius.toFixed(1)) : 'N/A';
             targetTemp = `ECO (${heatTemp}°C - ${coolTemp}°C)`;
+          } else if (baseMode === 'HEATCOOL' || baseMode === 'AUTO') {
+            // In HEATCOOL mode, show both setpoints formatted as a range
+            if (typeof heatSetpoint === 'number' && typeof coolSetpoint === 'number') {
+              targetTemp = `${Number(heatSetpoint.toFixed(1))}°C - ${Number(coolSetpoint.toFixed(1))}°C`;
+            } else if (typeof heatSetpoint === 'number') {
+              targetTemp = Number(heatSetpoint.toFixed(1));
+            } else if (typeof coolSetpoint === 'number') {
+              targetTemp = Number(coolSetpoint.toFixed(1));
+            }
           } else if (baseMode === 'COOL') {
-            const temp = traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.coolCelsius;
-            targetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
+            targetTemp = typeof coolSetpoint === 'number' ? Number(coolSetpoint.toFixed(1)) : 'N/A';
           } else if (baseMode === 'HEAT') {
-            const temp = traits['sdm.devices.traits.ThermostatTemperatureSetpoint']?.heatCelsius;
-            targetTemp = typeof temp === 'number' ? Number(temp.toFixed(1)) : 'N/A';
+            targetTemp = typeof heatSetpoint === 'number' ? Number(heatSetpoint.toFixed(1)) : 'N/A';
           }
 
-          // Determine device status
+          // Determine device status from HVAC trait
+          // FIX: Previously status was showing 'UNKNOWN' when HVAC was idle
+          // CHANGE: Extract status from ThermostatHvac trait and default to 'IDLE' instead of 'UNKNOWN'
+          // WHY: The HVAC trait provides accurate real-time status (HEATING, COOLING, OFF)
+          //      When status is 'OFF' or missing, it means HVAC is idle (not heating/cooling)
+          //      'IDLE' is more user-friendly than 'UNKNOWN' or 'OFF'
+          // Log HVAC trait for debugging
+          console.log('HVAC trait for device:', {
+            deviceId,
+            hvacTrait,
+            hvacStatus: hvacTrait.status,
+            hvacTraitKeys: Object.keys(hvacTrait)
+          });
+          
           let status = 'UNKNOWN';
           if (hvacTrait.status) {
-            status = hvacTrait.status;
+            // Map 'OFF' status to 'IDLE' for better UX
+            status = hvacTrait.status === 'OFF' ? 'IDLE' : hvacTrait.status;
           } else if (isEcoMode) {
             status = 'IDLE';  // Default to IDLE when in ECO mode
+          } else {
+            // Default to IDLE when HVAC is not active (common when thermostat is maintaining temperature)
+            status = 'IDLE';
           }
 
           const processedDevice = {
@@ -525,7 +557,12 @@ try {
               ? Number(traits['sdm.devices.traits.Humidity'].ambientHumidityPercent.toFixed(1))
               : 'N/A',
             availableModes: thermostatModeTrait.availableModes || ['HEAT', 'COOL', 'HEATCOOL', 'OFF'],
-            hasEcoTrait: !!traits['sdm.devices.traits.ThermostatEco']
+            hasEcoTrait: !!traits['sdm.devices.traits.ThermostatEco'],
+            // ADDED: Include raw setpoints for components that need them (e.g., TemperatureDial)
+            // WHY: Frontend components need individual heat/cool setpoint values for adjustment controls
+            //      The targetTemp string format is for display, but components need numeric values
+            heatSetpoint: typeof heatSetpoint === 'number' ? Number(heatSetpoint.toFixed(1)) : undefined,
+            coolSetpoint: typeof coolSetpoint === 'number' ? Number(coolSetpoint.toFixed(1)) : undefined
           };
 
           console.log('Processed device:', processedDevice);
